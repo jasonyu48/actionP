@@ -1,0 +1,7 @@
+xrf555
+xrf555_processed
+__pycache__
+*.npy
+*.png
+test_torch.py
+*.ipynb

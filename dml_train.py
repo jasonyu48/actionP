@@ -52,7 +52,7 @@ if __name__ == "__main__":
     train_size = int(train_dataset.__len__())
     # import train_data
     train_data = Data.DataLoader(dataset=train_dataset, batch_size=args.batch_size, shuffle=True, pin_memory=True,
-                                 num_workers=16, drop_last=False)
+                                 num_workers=1, drop_last=False)
 
     '''========================= Model =========================='''
     models = [
