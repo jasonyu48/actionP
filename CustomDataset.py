@@ -3,16 +3,24 @@ import torch
 import os
 from torch.utils.data.dataset import Dataset
 import numpy as np
-from glob import glob
 
 log = logging.getLogger(__name__)
 
 class XRFProcessedDataset(Dataset):
-    def __init__(self, base_dir='./xrf555_processed', is_train=True, train_ratio=0.9):
+    def __init__(self, base_dir='./xrf555_processed', split='train'):
+        """
+        Initialize the dataset.
+        Args:
+            base_dir (str): Base directory containing the data
+            split (str): One of 'train', 'val', or 'test'
+        """
         super().__init__()
         self.base_dir = base_dir
-        self.is_train = is_train
-        self.train_ratio = train_ratio
+        self.split = split
+        
+        # Validate split parameter
+        if split not in ['train', 'val', 'test']:
+            raise ValueError("split must be one of 'train', 'val', or 'test'")
         
         # Get all action types (folders in the base directory)
         self.action_types = [d for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
@@ -51,12 +59,20 @@ class XRFProcessedDataset(Dataset):
         np.random.seed(42)  # For reproducibility
         np.random.shuffle(all_samples)
         
-        # Split into train and test
-        split_idx = int(len(all_samples) * train_ratio)
-        self.samples = all_samples[:split_idx] if is_train else all_samples[split_idx:]
+        # Calculate split indices (70% train, 15% val, 15% test)
+        total_samples = len(all_samples)
+        train_idx = int(total_samples * 0.7)
+        val_idx = int(total_samples * 0.85)  # 70% + 15% = 85%
         
-        dataset_type = "training" if is_train else "test"
-        print(f"Loaded {len(self.samples)} {dataset_type} samples from {len(self.action_types)} action types")
+        # Split the data according to the specified split
+        if split == 'train':
+            self.samples = all_samples[:train_idx]
+        elif split == 'val':
+            self.samples = all_samples[train_idx:val_idx]
+        else:  # test
+            self.samples = all_samples[val_idx:]
+        
+        print(f"Loaded {len(self.samples)} {split} samples from {len(self.action_types)} action types")
         print(f"Action types: {self.action_types}")
 
     def __len__(self):
@@ -77,69 +93,3 @@ class XRFProcessedDataset(Dataset):
         noisy_data = torch.from_numpy(noisy_data).float()
         
         return sim_data, noisy_data, label
-
-
-# Keep the original dataset class for backward compatibility
-class XRFBertDatasetNewMix(Dataset):
-    def __init__(self, file_path='./dataset/XRFDataset/', is_train=True, scene='dml'):
-        super(XRFBertDatasetNewMix, self).__init__()
-        self.word_list = np.load("./word2vec/bert_new_sentence_large_uncased.npy")
-        self.file_path = file_path
-        self.is_train = is_train
-        self.scene = scene
-        if self.is_train:
-            self.file = self.file_path + self.scene + '_train.txt'
-        else:
-            self.file = self.file_path + self.scene + '_val.txt'
-        file = open(self.file)
-        val_list = file.readlines()
-        self.data = {
-            'file_name': list(),
-            'label': list()
-        }
-        self.path = self.file_path + self.scene + '_new_data/'
-        for string in val_list:
-            self.data['file_name'].append(string.split(',')[0])
-            self.data['label'].append(int(string.split(',')[2]) - 1)
-        log.info("load XRF dataset")
-
-    def __len__(self):
-        return len(self.data['label'])
-
-    def __getitem__(self, idx):
-        file_name = self.data['file_name'][idx]
-        label = self.data['label'][idx]
-        vector = self.word_list[label]
-
-        wifi_data = load_wifi(file_name, self.is_train, path=self.path)
-        rfid_data = load_rfid(file_name, self.is_train, path=self.path)
-        mmwave_data = load_mmwave(file_name, self.is_train, path=self.path)
-        return wifi_data, rfid_data, mmwave_data, label, vector
-
-
-def load_rfid(filename, is_train, path='./dataset/XRFDataset/'):
-    if is_train:
-        path = path + 'train_data/'
-    else:
-        path = path + 'test_data/'
-    record = np.load(path + 'RFID/' + filename + ".npy")
-    return torch.from_numpy(record).float()
-
-
-def load_wifi(filename, is_train, path='./dataset/XRFDataset/'):
-    if is_train:
-        path = path + 'train_data/'
-    else:
-        path = path + 'test_data/'
-    record = np.load(path + 'WiFi/' + filename + ".npy")
-    return torch.from_numpy(record).float()
-
-
-def load_mmwave(filename, is_train, path='./dataset/XRFDataset/'):
-    if is_train:
-        path = path + 'train_data/'
-    else:
-        path = path + 'test_data/'
-    mmWave_data = np.load(path + 'mmWave/' + filename + ".npy")
-    return torch.from_numpy(mmWave_data).float()
-

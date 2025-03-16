@@ -34,13 +34,15 @@ def write_to_file(conf_matrix, path):
     df.to_csv(path + '.csv')
 
 
-def create_dataloaders(train_dataset, test_dataset, batch_size):
-    """Create train and test dataloaders."""
+def create_dataloaders(train_dataset, val_dataset, test_dataset, batch_size):
+    """Create train, validation and test dataloaders."""
     train_data = Data.DataLoader(dataset=train_dataset, batch_size=batch_size, 
                                 shuffle=True, pin_memory=True, num_workers=1, drop_last=False)
+    val_data = Data.DataLoader(dataset=val_dataset, batch_size=batch_size, 
+                              shuffle=False, pin_memory=True, num_workers=1, drop_last=False)
     test_data = Data.DataLoader(dataset=test_dataset, batch_size=batch_size, 
                                shuffle=False, pin_memory=True, num_workers=1, drop_last=False)
-    return train_data, test_data
+    return train_data, val_data, test_data
 
 
 def train_epoch(model, train_data, optimizer, loss_ce, use_noisy=True):
@@ -93,10 +95,10 @@ def evaluate_model(model, test_data, loss_ce, use_noisy=True):
     return test_loss, test_acc
 
 
-def train_model(train_dataset, test_dataset, args, is_hyperparam_search=False):
+def train_model(train_dataset, val_dataset, test_dataset, args, is_hyperparam_search=False):
     """Unified training function for both hyperparameter search and full training."""
     # Create dataloaders
-    train_data, test_data = create_dataloaders(train_dataset, test_dataset, args.batch_size)
+    train_data, val_data, test_data = create_dataloaders(train_dataset, val_dataset, test_dataset, args.batch_size)
     
     # Initialize model and training components
     model = resnet2d.resnet18_mutual().cuda()
@@ -114,6 +116,8 @@ def train_model(train_dataset, test_dataset, args, is_hyperparam_search=False):
     
     # Initialize metrics storage
     train_loss = np.zeros(num_epochs)
+    val_loss = np.zeros(num_epochs)
+    val_acc = np.zeros(num_epochs)
     test_loss = np.zeros(num_epochs)
     test_acc = np.zeros(num_epochs)
     best_acc = 0.0
@@ -126,15 +130,26 @@ def train_model(train_dataset, test_dataset, args, is_hyperparam_search=False):
         train_loss[epoch] = train_epoch(model, train_data, optimizer, loss_ce, args.use_noisy)
         print(f'Train Loss: {train_loss[epoch]:.6f}')
         
-        # Evaluate
+        # Evaluate on validation set
+        val_loss[epoch], val_acc[epoch] = evaluate_model(model, val_data, loss_ce, args.use_noisy)
+        print(f'Val Loss: {val_loss[epoch]:.6f} | Val Acc: {val_acc[epoch]:.2f}%')
+        
+        # Keep track of best model based on validation accuracy
+        if val_acc[epoch] > best_acc:
+            best_acc = val_acc[epoch]
+            if not is_hyperparam_search:
+                save_dir = f'result/params/train_mmwave_processed_{"noisy" if args.use_noisy else "sim"}/'
+                os.makedirs(save_dir, exist_ok=True)
+                torch.save(model.state_dict(), f'{save_dir}/model_best.pth')
+        
+        # Evaluate on test set periodically
         if is_hyperparam_search or (epoch + 1) % 20 == 0 or epoch == num_epochs - 1:
             test_loss[epoch], test_acc[epoch] = evaluate_model(model, test_data, loss_ce, args.use_noisy)
-            best_acc = max(best_acc, test_acc[epoch])
             print(f'Test Loss: {test_loss[epoch]:.6f} | Test Acc: {test_acc[epoch]:.2f}%')
         
         scheduler.step()
         
-        # Save model if needed (only in full training)
+        # Save final model (only in full training)
         if not is_hyperparam_search and epoch >= num_epochs - 1:
             save_dir = f'result/params/train_mmwave_processed_{"noisy" if args.use_noisy else "sim"}/'
             os.makedirs(save_dir, exist_ok=True)
@@ -146,6 +161,8 @@ def train_model(train_dataset, test_dataset, args, is_hyperparam_search=False):
         os.makedirs(save_dir, exist_ok=True)
         sio.savemat(f'{save_dir}/metrics.mat', {
             'train_loss': train_loss,
+            'val_loss': val_loss,
+            'val_acc': val_acc,
             'test_loss': test_loss,
             'test_acc': test_acc
         })
@@ -153,7 +170,7 @@ def train_model(train_dataset, test_dataset, args, is_hyperparam_search=False):
     return best_acc if is_hyperparam_search else None
 
 
-def hyperparameter_search(train_dataset, test_dataset):
+def hyperparameter_search(train_dataset, val_dataset):
     """Search for best hyperparameters."""
     # Define hyperparameter search space
     # batch_sizes = [64, 128, 256]
@@ -184,7 +201,7 @@ def hyperparameter_search(train_dataset, test_dataset):
         args.lr = lr
         
         # Train and evaluate
-        acc = train_model(train_dataset, test_dataset, args, is_hyperparam_search=True)
+        acc = train_model(train_dataset, val_dataset, train_dataset, args, is_hyperparam_search=True)
         
         results.append({
             'batch_size': batch_size,
@@ -217,13 +234,14 @@ if __name__ == "__main__":
     starttime = datetime.datetime.now()
     
     # Load datasets
-    train_dataset = XRFProcessedDataset(base_dir='./xrf555_processed', is_train=True)
-    test_dataset = XRFProcessedDataset(base_dir='./xrf555_processed', is_train=False)
+    train_dataset = XRFProcessedDataset(base_dir='./xrf555_processed', split='train')
+    val_dataset = XRFProcessedDataset(base_dir='./xrf555_processed', split='val')
+    test_dataset = XRFProcessedDataset(base_dir='./xrf555_processed', split='test')
     
     if args.do_search:
         print("Starting hyperparameter search...")
         # Perform hyperparameter search
-        best_params = hyperparameter_search(train_dataset, test_dataset)
+        best_params = hyperparameter_search(train_dataset, val_dataset)
         
         # Update args with best parameters
         args.batch_size = best_params['batch_size']
@@ -236,7 +254,7 @@ if __name__ == "__main__":
         print(f"Using batch_size={args.batch_size}, lr={args.lr}")
     
     # Perform full training
-    train_model(train_dataset, test_dataset, args, is_hyperparam_search=False)
+    train_model(train_dataset, val_dataset, test_dataset, args, is_hyperparam_search=False)
     
     endtime = datetime.datetime.now()
     print(f"Total time: {(endtime - starttime).seconds} seconds")

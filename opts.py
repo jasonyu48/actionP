@@ -10,9 +10,9 @@ def parse_opts():
     parser.add_argument('--batch_size', default=128, type=int, help='Batch Size') #original: 64, cannot be 1!!!!
     parser.add_argument("--local_rank", type=int, default=1,
                         help="number of cpu threads to use during batch generation")
-    parser.add_argument('--use_noisy', action='store_true', default=True, 
+    parser.add_argument('--use_noisy', action='store_true', default=False, 
                         help='Use noisy data for training (default: True)')
-    parser.add_argument('--do_search', action='store_true', default=True,
+    parser.add_argument('--do_search', action='store_true', default=False,
                         help='Perform hyperparameter search before training (default: False)')
 
     args = parser.parse_args()
