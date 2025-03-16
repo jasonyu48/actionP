@@ -156,8 +156,10 @@ def train_model(train_dataset, test_dataset, args, is_hyperparam_search=False):
 def hyperparameter_search(train_dataset, test_dataset):
     """Search for best hyperparameters."""
     # Define hyperparameter search space
-    batch_sizes = [64, 128, 256]
-    learning_rates = [0.001, 0.01, 0.1]
+    # batch_sizes = [64, 128, 256]
+    # learning_rates = [0.001, 0.01, 0.1]
+    batch_sizes = [128]
+    learning_rates = [0.0001, 0.0005, 0.001]
     
     best_params = {
         'batch_size': None,
