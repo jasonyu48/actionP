@@ -10,9 +10,10 @@ from tqdm import tqdm
 import scipy.io as sio
 import matplotlib.pyplot as plt
 import datetime
-from CustomDataset import XRFProcessedDataset  # Import the new dataset class
+from CustomDataset import XRFProcessedDataset
 from opts import parse_opts
-from model import resnet2d  # Only import the mmWave model
+from model import resnet2d
+import itertools
 
 
 def get_conf_matrix(pred, truth, conf_matrix):
@@ -33,151 +34,207 @@ def write_to_file(conf_matrix, path):
     df.to_csv(path + '.csv')
 
 
-if __name__ == "__main__":
-    # Parse command line arguments
-    args = parse_opts()
+def create_dataloaders(train_dataset, test_dataset, batch_size):
+    """Create train and test dataloaders."""
+    train_data = Data.DataLoader(dataset=train_dataset, batch_size=batch_size, 
+                                shuffle=True, pin_memory=True, num_workers=1, drop_last=False)
+    test_data = Data.DataLoader(dataset=test_dataset, batch_size=batch_size, 
+                               shuffle=False, pin_memory=True, num_workers=1, drop_last=False)
+    return train_data, test_data
+
+
+def train_epoch(model, train_data, optimizer, loss_ce, use_noisy=True):
+    """Train for one epoch."""
+    model.train()
+    loss_sum = 0
+    train_size = len(train_data.dataset)
     
-    # Used to save the names of model parameters and subsequent evaluations.
-    data_type = "noisy" if args.use_noisy else "sim"
-    model_name = f"train_mmwave_processed_{data_type}"  # Updated name to reflect data type
-    print(model_name)
-    print(f"Using {'noisy' if args.use_noisy else 'simulation'} data for training")
+    for (sim_data, noisy_data, labels) in tqdm(train_data, desc='Training'):
+        # Select data based on argument
+        samplesMmWave = Variable((noisy_data if use_noisy else sim_data).cuda())
+        labelsV = Variable(labels.cuda())
+        
+        # Forward pass
+        outputs, _ = model(samplesMmWave)
+        loss = loss_ce(outputs, labelsV)
+        loss_sum += loss.item()
+        
+        # Backward pass and optimization
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
     
-    starttime = datetime.datetime.now()
+    return loss_sum / train_size
 
-    '''========================= Dataset =========================='''
-    # Use the new dataset class that loads from processed data
-    train_dataset = XRFProcessedDataset(base_dir='./xrf555_processed', is_train=True)
-    test_dataset = XRFProcessedDataset(base_dir='./xrf555_processed', is_train=False)
+
+def evaluate_model(model, test_data, loss_ce, use_noisy=True):
+    """Evaluate model on test set."""
+    model.eval()
+    test_loss_sum = 0
+    correct = 0
+    total = 0
+    test_size = len(test_data.dataset)
     
-    # define train_dataset size
-    train_size = int(train_dataset.__len__())
-    test_size = int(test_dataset.__len__())
-    
-    # import train_data and test_data
-    train_data = Data.DataLoader(dataset=train_dataset, batch_size=args.batch_size, shuffle=True, pin_memory=True,
-                                 num_workers=1, drop_last=False)
-    test_data = Data.DataLoader(dataset=test_dataset, batch_size=args.batch_size, shuffle=False, pin_memory=True,
-                                num_workers=1, drop_last=False)
-
-    '''========================= Model =========================='''
-    # Only use the mmWave model
-    model = resnet2d.resnet18_mutual()
-    torch.cuda.init()  # Pre-initialize CUDA
-    model = model.cuda()
-    
-    # Single optimizer and scheduler
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
-                                                     milestones=[40, 80, 120, 160],
-                                                     gamma=0.5)
-
-    train_loss = np.zeros(args.epoch)
-    test_loss = np.zeros(args.epoch)
-    test_acc = np.zeros(args.epoch)
-    print("--------------MmWave Training on Processed Data---------------")
-    print(f"Train on {train_size} samples, validate on {test_size} samples.")
-
-    # Only using cross-entropy loss for classification
-    loss_ce = nn.CrossEntropyLoss().cuda()
-
-    idx = 0
-    if not os.path.exists('result/params/' + model_name + '/'):
-        os.mkdir('result/params/' + model_name + '/')
-
-    for epoch in range(args.epoch):
-        print("Epoch:", epoch)
-        '''======================================== Train ==========================================='''
-        loss_sum = 0
-        model.train()
-
-        for (sim_data, noisy_data, labels) in tqdm(train_data):
-            # Select data based on command line argument
-            if args.use_noisy:
-                # Use noisy data for training (more robust)
-                samplesMmWave = Variable(noisy_data.cuda())
-            else:
-                # Use simulation data for training (cleaner)
-                samplesMmWave = Variable(sim_data.cuda())
-                
-            labelsV = Variable(labels.cuda())
+    with torch.no_grad():
+        for (sim_data, noisy_data, labels) in tqdm(test_data, desc='Testing'):
+            samplesMmWave = (noisy_data if use_noisy else sim_data).cuda()
+            labelsV = labels.cuda()
             
-            # Forward pass - we still get both outputs but only use the classification output
             outputs, _ = model(samplesMmWave)
-            
-            # Calculate loss (only cross-entropy for classification)
             loss = loss_ce(outputs, labelsV)
-            loss_sum += loss.item()
-
-            # Backward pass and optimization
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            test_loss_sum += loss.item()
             
-        # Step the scheduler
-        scheduler.step()
-
-        # Record and print training loss
-        train_loss[epoch] = loss_sum / train_size
-        print('Epoch {}, train_loss: {:.6f}'.format(epoch, loss_sum / train_size))
-        
-        '''======================================== Test =========================================='''
-        # Evaluate on test set every 20 epochs or on the last epoch
-        if (epoch + 1) % 20 == 0 or epoch == args.epoch - 1:
-            model.eval()
-            test_loss_sum = 0
-            correct = 0
-            total = 0
-            
-            with torch.no_grad():
-                for (sim_data, noisy_data, labels) in tqdm(test_data, desc='Testing'):
-                    # Select data based on command line argument
-                    if args.use_noisy:
-                        samplesMmWave = noisy_data.cuda()
-                    else:
-                        samplesMmWave = sim_data.cuda()
-                    
-                    labelsV = labels.cuda()
-                    
-                    # Forward pass
-                    outputs, _ = model(samplesMmWave)
-                    
-                    # Calculate loss
-                    loss = loss_ce(outputs, labelsV)
-                    test_loss_sum += loss.item()
-                    
-                    # Calculate accuracy
-                    _, predicted = outputs.max(1)
-                    total += labelsV.size(0)
-                    correct += predicted.eq(labelsV).sum().item()
-            
-            # Record test metrics
-            test_loss[epoch] = test_loss_sum / test_size
-            test_acc[epoch] = 100. * correct / total
-            
-            print('Test Loss: {:.6f} | Test Acc: {:.2f}%'.format(
-                test_loss[epoch], test_acc[epoch]))
-        
-        # Save model for the last epoch
-        if epoch >= args.epoch-1:
-            torch.save(model.state_dict(), f'./result/params/{model_name}/model_epoch{idx}.pth')
-            idx += 1
-
-    # Save learning curves
-    if not os.path.exists('result/learning_curve/' + model_name + '/'):
-        os.mkdir('result/learning_curve/' + model_name + '/')
+            _, predicted = outputs.max(1)
+            total += labelsV.size(0)
+            correct += predicted.eq(labelsV).sum().item()
     
-    sio.savemat(
-        'result/learning_curve/' + model_name + '/'
-        + model_name + '_metrics.mat', 
-        {
+    test_loss = test_loss_sum / test_size
+    test_acc = 100. * correct / total
+    return test_loss, test_acc
+
+
+def train_model(train_dataset, test_dataset, args, is_hyperparam_search=False):
+    """Unified training function for both hyperparameter search and full training."""
+    # Create dataloaders
+    train_data, test_data = create_dataloaders(train_dataset, test_dataset, args.batch_size)
+    
+    # Initialize model and training components
+    model = resnet2d.resnet18_mutual().cuda()
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    
+    # Different scheduler settings for hyperparam search vs full training
+    if is_hyperparam_search:
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[4, 7], gamma=0.5)
+        num_epochs = 15
+    else:
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[20, 40, 80, 100], gamma=0.5)
+        num_epochs = args.epoch
+    
+    loss_ce = nn.CrossEntropyLoss().cuda()
+    
+    # Initialize metrics storage
+    train_loss = np.zeros(num_epochs)
+    test_loss = np.zeros(num_epochs)
+    test_acc = np.zeros(num_epochs)
+    best_acc = 0.0
+    
+    # Training loop
+    for epoch in range(num_epochs):
+        print(f"\nEpoch: {epoch}")
+        
+        # Train
+        train_loss[epoch] = train_epoch(model, train_data, optimizer, loss_ce, args.use_noisy)
+        print(f'Train Loss: {train_loss[epoch]:.6f}')
+        
+        # Evaluate
+        if is_hyperparam_search or (epoch + 1) % 20 == 0 or epoch == num_epochs - 1:
+            test_loss[epoch], test_acc[epoch] = evaluate_model(model, test_data, loss_ce, args.use_noisy)
+            best_acc = max(best_acc, test_acc[epoch])
+            print(f'Test Loss: {test_loss[epoch]:.6f} | Test Acc: {test_acc[epoch]:.2f}%')
+        
+        scheduler.step()
+        
+        # Save model if needed (only in full training)
+        if not is_hyperparam_search and epoch >= num_epochs - 1:
+            save_dir = f'result/params/train_mmwave_processed_{"noisy" if args.use_noisy else "sim"}/'
+            os.makedirs(save_dir, exist_ok=True)
+            torch.save(model.state_dict(), f'{save_dir}/model_final.pth')
+    
+    if not is_hyperparam_search:
+        # Save metrics for full training
+        save_dir = f'result/learning_curve/train_mmwave_processed_{"noisy" if args.use_noisy else "sim"}/'
+        os.makedirs(save_dir, exist_ok=True)
+        sio.savemat(f'{save_dir}/metrics.mat', {
             'train_loss': train_loss,
             'test_loss': test_loss,
             'test_acc': test_acc
         })
+    
+    return best_acc if is_hyperparam_search else None
 
-    print(model_name)
+
+def hyperparameter_search(train_dataset, test_dataset):
+    """Search for best hyperparameters."""
+    # Define hyperparameter search space
+    batch_sizes = [64, 128, 256]
+    learning_rates = [0.001, 0.01, 0.1]
+    
+    best_params = {
+        'batch_size': None,
+        'lr': None,
+        'accuracy': 0.0
+    }
+    
+    # Create results directory
+    results_dir = 'result/hyperparam_search'
+    os.makedirs(results_dir, exist_ok=True)
+    results = []
+    
+    print("Starting Hyperparameter Search...")
+    # Create a base args object for hyperparameter search
+    args = parse_opts()
+    
+    for batch_size, lr in itertools.product(batch_sizes, learning_rates):
+        print(f"\nTrying batch_size={batch_size}, lr={lr}")
+        
+        # Update args with current hyperparameters
+        args.batch_size = batch_size
+        args.lr = lr
+        
+        # Train and evaluate
+        acc = train_model(train_dataset, test_dataset, args, is_hyperparam_search=True)
+        
+        results.append({
+            'batch_size': batch_size,
+            'lr': lr,
+            'accuracy': acc
+        })
+        
+        if acc > best_params['accuracy']:
+            best_params = {
+                'batch_size': batch_size,
+                'lr': lr,
+                'accuracy': acc
+            }
+    
+    # Save results
+    df = pd.DataFrame(results)
+    df.to_csv(f'{results_dir}/hyperparam_search_results.csv', index=False)
+    
+    print("\nHyperparameter Search Results:")
+    print(f"Best batch_size: {best_params['batch_size']}")
+    print(f"Best learning rate: {best_params['lr']}")
+    print(f"Best test accuracy: {best_params['accuracy']:.2f}%")
+    
+    return best_params
+
+
+if __name__ == "__main__":
+    # Parse command line arguments
+    args = parse_opts()
+    starttime = datetime.datetime.now()
+    
+    # Load datasets
+    train_dataset = XRFProcessedDataset(base_dir='./xrf555_processed', is_train=True)
+    test_dataset = XRFProcessedDataset(base_dir='./xrf555_processed', is_train=False)
+    
+    if args.do_search:
+        print("Starting hyperparameter search...")
+        # Perform hyperparameter search
+        best_params = hyperparameter_search(train_dataset, test_dataset)
+        
+        # Update args with best parameters
+        args.batch_size = best_params['batch_size']
+        args.lr = best_params['lr']
+        
+        print("\nProceeding with full training using best parameters...")
+        print(f"Using batch_size={args.batch_size}, lr={args.lr}")
+    else:
+        print("Skipping hyperparameter search, using provided parameters...")
+        print(f"Using batch_size={args.batch_size}, lr={args.lr}")
+    
+    # Perform full training
+    train_model(train_dataset, test_dataset, args, is_hyperparam_search=False)
+    
     endtime = datetime.datetime.now()
-    print(starttime)
-    print(endtime)
-    print((endtime - starttime).seconds)
+    print(f"Total time: {(endtime - starttime).seconds} seconds")

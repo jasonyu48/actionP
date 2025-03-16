@@ -12,6 +12,8 @@ def parse_opts():
                         help="number of cpu threads to use during batch generation")
     parser.add_argument('--use_noisy', action='store_true', default=True, 
                         help='Use noisy data for training (default: True)')
+    parser.add_argument('--do_search', action='store_true', default=True,
+                        help='Perform hyperparameter search before training (default: False)')
 
     args = parser.parse_args()
 
