@@ -6,3 +6,5 @@ __pycache__
 test_torch.py
 *.ipynb
 result
+Focus
+Focus_processed

@@ -3,6 +3,8 @@ import numpy as np
 from tqdm import tqdm
 import shutil
 
+# process the data in the xrf555 folder so that the second dimension is 30
+
 def process_xrf_data():
     # Base directory containing all action types
     base_dir = 'xrf555'
