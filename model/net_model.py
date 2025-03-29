@@ -82,34 +82,66 @@ class mmWaveBranch(nn.Module):
         self.num_channels = params.num_channels
         self.dropout_ = params.dropout_rate
         self.num_antennas = getattr(params, 'num_antennas', 12)  # Default to 12 antennas if not specified
+        self.data_format = getattr(params, 'data_format', 'processed')  # 'processed' or 'original'
         
         # For Focus_processed data:
         # RDspecs has shape [time, 2, num_antennas, time/velocity, 32]
         # AoAspecs has shape [time, 256, 256]
         
-        # Modified encoders for the new data format
-        self.range_encoder = SpecEncoder(
-            self.num_channels, 
-            input_channels=self.num_antennas,  # Antennas as channels
-            input_size=(128, 32)  # time/velocity = 128, range = 32 (31 + 1)
-        )
+        # For original Focus data:
+        # RDspecs has shape [time, 2, num_antennas, time/velocity, 256]
+        # AoAspecs has shape [time, 256, 256]
         
-        self.music_encoder = SpecEncoder(
-            self.num_channels,
-            input_channels=1,  # Single channel for AoA
-            input_size=(256, 256)  # Original AoA dimensions
-        )
-        
-        self.doppler_encoder = SpecEncoder(
-            self.num_channels,
-            input_channels=self.num_antennas,  # Antennas as channels
-            input_size=(128, 32)  # time/velocity = 128, range = 32 (31 + 1)
-        )
-
-        # Calculate the output size of each encoder
-        range_out_size = self.num_channels * (128//4) * (32//4)
-        music_out_size = self.num_channels * (256//4) * (256//4)
-        doppler_out_size = self.num_channels * (128//4) * (32//4)
+        if self.data_format == 'original':
+            # Encoders for original Focus data
+            self.range_encoder = SpecEncoder(
+                self.num_channels, 
+                input_channels=self.num_antennas,  # Antennas as channels
+                input_size=(128, 256)  # time/velocity = 128, range = 256
+            )
+            
+            self.music_encoder = SpecEncoder(
+                self.num_channels,
+                input_channels=1,  # Single channel for AoA
+                input_size=(256, 256)  # Original AoA dimensions
+            )
+            
+            self.doppler_encoder = SpecEncoder(
+                self.num_channels,
+                input_channels=self.num_antennas,  # Antennas as channels
+                input_size=(128, 256)  # time/velocity = 128, range = 256
+            )
+            
+            # Calculate the output size of each encoder
+            range_out_size = self.num_channels * (128//4) * (256//4)
+            music_out_size = self.num_channels * (256//4) * (256//4)
+            doppler_out_size = self.num_channels * (128//4) * (256//4)
+            
+        else:
+            # Default encoders for processed Focus data
+            self.range_encoder = SpecEncoder(
+                self.num_channels, 
+                input_channels=self.num_antennas,  # Antennas as channels
+                input_size=(128, 32)  # time/velocity = 128, range = 32 (31 + 1)
+            )
+            
+            self.music_encoder = SpecEncoder(
+                self.num_channels,
+                input_channels=1,  # Single channel for AoA
+                input_size=(256, 256)  # Original AoA dimensions
+            )
+            
+            self.doppler_encoder = SpecEncoder(
+                self.num_channels,
+                input_channels=self.num_antennas,  # Antennas as channels
+                input_size=(128, 32)  # time/velocity = 128, range = 32 (31 + 1)
+            )
+            
+            # Calculate the output size of each encoder
+            range_out_size = self.num_channels * (128//4) * (32//4)
+            music_out_size = self.num_channels * (256//4) * (256//4)
+            doppler_out_size = self.num_channels * (128//4) * (32//4)
+            
         total_fusion_size = range_out_size + music_out_size + doppler_out_size
         
         self.fusion_block = nn.Sequential(
@@ -139,17 +171,29 @@ class mmWaveBranch(nn.Module):
     
     def forward(self, RDspecs, AoAspecs, specs_mask):
         """
-        Process Focus_processed data:
+        Process data in either the processed or original Focus format:
+        
+        Processed Focus data:
         RDspecs: (batch_size, time_steps, 2, num_antennas, 128, 32) 
                 where 32 = 31 (range data) + 1 (normalized position)
         AoAspecs: (batch_size, time_steps, 256, 256)
+        
+        Original Focus data:
+        RDspecs: (batch_size, time_steps, 2, num_antennas, 128, 256)
+        AoAspecs: (batch_size, time_steps, 256, 256)
+        
         specs_mask: (batch_size, time_steps) padding mask
         """
         batch_size, time_steps = RDspecs.shape[0], RDspecs.shape[1]
         
+        if self.data_format == 'original':
+            range_dim_size = 256
+        else:
+            range_dim_size = 32
+        
         # Process range data (dim=0)
-        range_data = RDspecs[:, :, 0]  # (batch_size, time_steps, num_antennas, 128, 32)
-        range_data = range_data.view(-1, self.num_antennas, 128, 32)  # (batch_size*time_steps, num_antennas, 128, 32)
+        range_data = RDspecs[:, :, 0]  # (batch_size, time_steps, num_antennas, 128, range_dim_size)
+        range_data = range_data.view(-1, self.num_antennas, 128, range_dim_size)
         range_embed = self.range_encoder(range_data)
         
         # Process AoA data for music encoder
@@ -157,8 +201,8 @@ class mmWaveBranch(nn.Module):
         music_embed = self.music_encoder(aoa_data)
         
         # Process doppler data (dim=1)
-        doppler_data = RDspecs[:, :, 1]  # (batch_size, time_steps, num_antennas, 128, 32)?????
-        doppler_data = doppler_data.view(-1, self.num_antennas, 128, 32)  # (batch_size*time_steps, num_antennas, 128, 32)
+        doppler_data = RDspecs[:, :, 1]  # (batch_size, time_steps, num_antennas, 128, range_dim_size)
+        doppler_data = doppler_data.view(-1, self.num_antennas, 128, range_dim_size)
         doppler_embed = self.doppler_encoder(doppler_data)
         
         # Concatenate all embeddings

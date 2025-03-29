@@ -149,3 +149,38 @@ def setup_seed(seed):
      random.seed(seed)
      torch.backends.cudnn.deterministic = True
      
+def getModelSize(model):
+    """
+    Calculate the size of a PyTorch model in memory.
+    
+    Args:
+        model: PyTorch model
+        
+    Returns:
+        tuple: (param_size, param_count, buffer_size, buffer_count, total_size_mb)
+            - param_size: Size of parameters in bytes
+            - param_count: Number of parameters
+            - buffer_size: Size of buffers in bytes
+            - buffer_count: Number of buffers
+            - total_size_mb: Total size in MB
+    """
+    param_size = 0
+    param_count = 0
+    for param in model.parameters():
+        param_size += param.nelement() * param.element_size()
+        param_count += param.nelement()
+    
+    buffer_size = 0
+    buffer_count = 0
+    for buffer in model.buffers():
+        buffer_size += buffer.nelement() * buffer.element_size()
+        buffer_count += buffer.nelement()
+    
+    total_size_mb = (param_size + buffer_size) / 1024 / 1024
+    
+    print(f'Model Size: {total_size_mb:.2f} MB')
+    print(f'Parameters: {param_count:,} ({param_size / 1024 / 1024:.2f} MB)')
+    print(f'Buffers: {buffer_count:,} ({buffer_size / 1024 / 1024:.2f} MB)')
+    
+    return (param_size, param_count, buffer_size, buffer_count, total_size_mb)
+     

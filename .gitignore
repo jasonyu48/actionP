@@ -8,3 +8,16 @@ test_torch.py
 result
 Focus
 Focus_processed
+focus_model
+lw_focus_model
+lw_focus_model_multi_angle
+focus_model_original
+focus_processed_model_singleangle
+focus_processed_model_multiangle
+lw_focus_model_singleangle
+lw_focus_model_multiangle
+lw_model
+lw_model_multi_angle
+
+Focus_processed_multi_angle
+xrf555_processed_multi_angle

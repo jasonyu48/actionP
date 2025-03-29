@@ -1,0 +1,26 @@
+Hyperparameter Search Results:                                                                                     [20/162]
+2025-03-21 01:17:37,003 - Focus_Training - INFO - LR: 1e-05, BS: 16, Val Acc: 0.5344                                       
+2025-03-21 01:17:37,003 - Focus_Training - INFO - LR: 1e-05, BS: 32, Val Acc: 0.5040                                       
+2025-03-21 01:17:37,003 - Focus_Training - INFO - LR: 1e-05, BS: 64, Val Acc: 0.3743                                       
+2025-03-21 01:17:37,003 - Focus_Training - INFO - LR: 0.0001, BS: 64, Val Acc: 0.3254                                      
+2025-03-21 01:17:37,003 - Focus_Training - INFO - LR: 0.0001, BS: 32, Val Acc: 0.2725                                      
+2025-03-21 01:17:37,003 - Focus_Training - INFO - LR: 0.0001, BS: 16, Val Acc: 0.1693                                      
+2025-03-21 01:17:37,003 - Focus_Training - INFO - LR: 0.0005, BS: 32, Val Acc: 0.1587                                      
+2025-03-21 01:17:37,003 - Focus_Training - INFO - LR: 0.0005, BS: 16, Val Acc: 0.1587                                      
+2025-03-21 01:17:37,003 - Focus_Training - INFO - LR: 0.0005, BS: 64, Val Acc: 0.1548                                      
+2025-03-21 01:17:37,004 - Focus_Training - INFO -                                                                          
+Best Configuration: LR=1e-05, BS=16, Val Acc=0.5344
+
+lw original:
+Hyperparameter Search Results:                                                                                                                                           
+2025-03-21 12:50:02,676 - Focus_Training - INFO - LR: 5e-06, BS: 16, Val Acc: 0.5648                                                                                     
+2025-03-21 12:50:02,676 - Focus_Training - INFO - LR: 1e-06, BS: 16, Val Acc: 0.5146                                                                                     
+2025-03-21 12:50:02,676 - Focus_Training - INFO - LR: 1e-05, BS: 8, Val Acc: 0.4696                                                                                      
+2025-03-21 12:50:02,676 - Focus_Training - INFO - LR: 1e-06, BS: 8, Val Acc: 0.4669                                                                                      
+2025-03-21 12:50:02,676 - Focus_Training - INFO - LR: 1e-05, BS: 16, Val Acc: 0.4630                                                                                     
+2025-03-21 12:50:02,676 - Focus_Training - INFO - LR: 5e-06, BS: 8, Val Acc: 0.4299                                                                                      
+2025-03-21 12:50:02,676 - Focus_Training - INFO - LR: 5e-06, BS: 4, Val Acc: 0.3624                                                                                      
+2025-03-21 12:50:02,676 - Focus_Training - INFO - LR: 1e-06, BS: 4, Val Acc: 0.3347                                                                                      
+2025-03-21 12:50:02,676 - Focus_Training - INFO - LR: 1e-05, BS: 4, Val Acc: 0.3241                                                                                      
+2025-03-21 12:50:02,677 - Focus_Training - INFO -                                                                                                                        
+Best Configuration: LR=5e-06, BS=16, Val Acc=0.5648

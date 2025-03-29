@@ -62,8 +62,8 @@ def crop_around_peak(data, target_idx, window_size=15):
 
 def process_focus_data():
     # Base directory containing all action types
-    base_dir = 'Focus'
-    output_base_dir = 'Focus_processed'
+    base_dir = '/weka/scratch/rzhao36/lwang/datasets/HOI/datasets/focus'
+    output_base_dir = 'Focus_processed_multi_angle'
     
     # Create output directory if it doesn't exist
     if not os.path.exists(output_base_dir):
@@ -71,6 +71,9 @@ def process_focus_data():
     
     # Get all action types
     action_types = [d for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
+    
+    # Define all angle folders to process
+    angle_folders = ['0', '90', '180', '270']
     
     for action_type in action_types:
         print(f"Processing action type: {action_type}")
@@ -80,69 +83,70 @@ def process_focus_data():
         if not os.path.exists(output_action_path):
             os.makedirs(output_action_path)
         
-        # Navigate to the 90 folder
-        ninety_path = os.path.join(action_path, '90')
-        output_ninety_path = os.path.join(output_action_path, '90')
-        
-        if not os.path.exists(ninety_path):
-            print(f"Warning: No '90' folder found for action type {action_type}")
-            continue
-        
-        if not os.path.exists(output_ninety_path):
-            os.makedirs(output_ninety_path)
-        
-        # Get all numbered folders
-        numbered_folders = [d for d in os.listdir(ninety_path) if os.path.isdir(os.path.join(ninety_path, d))]
-        
-        # Process each numbered folder
-        for folder in tqdm(numbered_folders, desc=f"Folders in {action_type}"):
-            folder_path = os.path.join(ninety_path, folder)
-            output_folder_path = os.path.join(output_ninety_path, folder)
+        # Process each angle folder
+        for angle in angle_folders:
+            angle_path = os.path.join(action_path, angle)
+            output_angle_path = os.path.join(output_action_path, angle)
             
-            if not os.path.exists(output_folder_path):
-                os.makedirs(output_folder_path)
+            if not os.path.exists(angle_path):
+                print(f"Warning: No '{angle}' folder found for action type {action_type}")
+                continue
             
-            # Process focus_specs.npz and focus_sim2real_specs.npz
-            for file_name in ['focus_specs.npz', 'focus_sim2real_specs.npz']:
-                input_path = os.path.join(folder_path, file_name)
-                output_path = os.path.join(output_folder_path, file_name)
+            if not os.path.exists(output_angle_path):
+                os.makedirs(output_angle_path)
+            
+            # Get all numbered folders
+            numbered_folders = [d for d in os.listdir(angle_path) if os.path.isdir(os.path.join(angle_path, d))]
+            
+            # Process each numbered folder
+            for folder in tqdm(numbered_folders, desc=f"Folders in {action_type}/{angle}"):
+                folder_path = os.path.join(angle_path, folder)
+                output_folder_path = os.path.join(output_angle_path, folder)
                 
-                if os.path.exists(input_path):
-                    try:
-                        # Load the data
-                        data = np.load(input_path)
-                        RDspecs = data['RDspecs']
-                        AoAspecs = data['AoAspecs']
-                        
-                        # Convert to torch tensor for processing
-                        RDspecs_torch = torch.from_numpy(RDspecs)
-                        
-                        # Process time range and velocity range separately
-                        processed_RD = np.zeros((RDspecs.shape[0], 2, RDspecs.shape[2], RDspecs.shape[3], 32))  # 32 = 31 + 1 for position
-                        
-                        for t in range(RDspecs.shape[0]):  # Loop over time
-                            for dim in range(2):  # Loop over time/velocity dimension
-                                current_frame = RDspecs_torch[t, dim]  # Shape: (12, 128, 256)
-                                _, target_idx = get_target_loc(current_frame)  # Shape: (12, 1)
-                                # Process the frame
-                                processed_frame = crop_around_peak(current_frame.numpy(), target_idx)
-                                processed_RD[t, dim] = processed_frame
-                        
-                        # Save the processed data
-                        np.savez(output_path, RDspecs=processed_RD, AoAspecs=AoAspecs)
-                        
-                    except Exception as e:
-                        print(f"Error processing {input_path}: {e}")
-                        import traceback
-                        traceback.print_exc()
-            
-            # Copy other files directly
-            for file_name in os.listdir(folder_path):
-                if file_name not in ['focus_specs.npz', 'focus_sim2real_specs.npz']:
-                    src_file = os.path.join(folder_path, file_name)
-                    dst_file = os.path.join(output_folder_path, file_name)
-                    if os.path.isfile(src_file):
-                        shutil.copy2(src_file, dst_file)
+                if not os.path.exists(output_folder_path):
+                    os.makedirs(output_folder_path)
+                
+                # Process focus_specs.npz and focus_sim2real_specs.npz
+                for file_name in ['focus_specs.npz', 'focus_sim2real_specs.npz']:
+                    input_path = os.path.join(folder_path, file_name)
+                    output_path = os.path.join(output_folder_path, file_name)
+                    
+                    if os.path.exists(input_path):
+                        try:
+                            # Load the data
+                            data = np.load(input_path)
+                            RDspecs = data['RDspecs']
+                            AoAspecs = data['AoAspecs']
+                            
+                            # Convert to torch tensor for processing
+                            RDspecs_torch = torch.from_numpy(RDspecs)
+                            
+                            # Process time range and velocity range separately
+                            processed_RD = np.zeros((RDspecs.shape[0], 2, RDspecs.shape[2], RDspecs.shape[3], 32))  # 32 = 31 + 1 for position
+                            
+                            for t in range(RDspecs.shape[0]):  # Loop over time
+                                for dim in range(2):  # Loop over time/velocity dimension
+                                    current_frame = RDspecs_torch[t, dim]  # Shape: (12, 128, 256)
+                                    _, target_idx = get_target_loc(current_frame)  # Shape: (12, 1)
+                                    # Process the frame
+                                    processed_frame = crop_around_peak(current_frame.numpy(), target_idx)
+                                    processed_RD[t, dim] = processed_frame
+                            
+                            # Save the processed data
+                            np.savez(output_path, RDspecs=processed_RD, AoAspecs=AoAspecs)
+                            
+                        except Exception as e:
+                            print(f"Error processing {input_path}: {e}")
+                            import traceback
+                            traceback.print_exc()
+                
+                # Copy other files directly
+                for file_name in os.listdir(folder_path):
+                    if file_name not in ['focus_specs.npz', 'focus_sim2real_specs.npz']:
+                        src_file = os.path.join(folder_path, file_name)
+                        dst_file = os.path.join(output_folder_path, file_name)
+                        if os.path.isfile(src_file):
+                            shutil.copy2(src_file, dst_file)
 
 if __name__ == "__main__":
     process_focus_data()

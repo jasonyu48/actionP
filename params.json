@@ -1,8 +1,8 @@
 {
     "num_channels": 16,
-    "learning_rate": 1e-5,
+    "learning_rate": 5e-6,
     "batch_size": 16,
-    "num_epochs": 80,
+    "num_epochs": 60,
     "num_workers": 1,
     "dropout_rate": 0.2,
     "cuda": true,
