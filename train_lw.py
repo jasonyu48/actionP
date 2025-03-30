@@ -24,7 +24,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='LW Focus Action Recognition Training')
     parser.add_argument('--params_path', type=str, default='params.json', help='Path to parameters JSON file')
     parser.add_argument('--data_dir', type=str, default='/weka/scratch/rzhao36/lwang/datasets/HOI/datasets/classic', help='Directory with LW data')
-    parser.add_argument('--checkpoint_dir', type=str, default='./lw_focus_model_multi_angle', help='Directory to save checkpoints')
+    parser.add_argument('--checkpoint_dir', type=str, default='./lw_model_single_angle', help='Directory to save checkpoints')
     parser.add_argument('--use_bf16', action='store_true', default=True, help='Use bfloat16 precision')
     parser.add_argument('--resume', action='store_true', default=False, help='Resume from checkpoint')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')

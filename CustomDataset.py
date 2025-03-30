@@ -81,8 +81,8 @@ class XRFProcessedDataset(Dataset):
             train_idx = int(n_samples * 0.7)
             val_idx = int(n_samples * 0.85)  # 70% + 15% = 85%
             
-            train_samples.extend(samples[:train_idx])
-            val_samples.extend(samples[train_idx:val_idx])
+            train_samples.extend(samples[:train_idx+1]) # +1 to make sure the number of samples is even
+            val_samples.extend(samples[train_idx+1:val_idx])
             test_samples.extend(samples[val_idx:])
         
         # Shuffle the samples within each split for good measure

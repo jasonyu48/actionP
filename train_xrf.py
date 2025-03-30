@@ -10,10 +10,32 @@ from tqdm import tqdm
 import scipy.io as sio
 import matplotlib.pyplot as plt
 import datetime
+import argparse
 from CustomDataset import XRFProcessedDataset
-from opts import parse_opts
 from model import resnet2d
 import itertools
+import json
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='XRFDataset')
+    parser.add_argument('--class_num', type=int, default=7, help='The Number of Classes')
+    parser.add_argument('--epoch', type=int, default=60, help='The Number of Epochs [default: 60]')
+    parser.add_argument('--lr', type=float, default=0.0005, help='Learning rate [default: 0.0005]')
+    parser.add_argument('--model_num', type=int, default=1, help='The Number of Models for Mutual Learning')
+    parser.add_argument('--batch_size', default=128, type=int, help='Batch Size [default: 128]')
+    parser.add_argument("--local_rank", type=int, default=1,
+                        help="Number of CPU threads to use during batch generation")
+    parser.add_argument('--use_noisy', action='store_true', default=True, 
+                        help='Use noisy data for training (default: True)')
+    parser.add_argument('--do_search', action='store_true', default=False,
+                        help='Perform hyperparameter search before training (default: False)')
+    parser.add_argument('--use_multi_angle', action='store_true', default=False,
+                        help='Use data from all angles (0, 90, 180, 270) instead of just 90 degrees (default: False)')
+    parser.add_argument('--checkpoint_dir', type=str, default='./xrf_model_single_angle',
+                        help='Directory to save checkpoints (default: ./xrf_model_single_angle)')
+    
+    return parser.parse_args()
 
 
 def get_conf_matrix(pred, truth, conf_matrix):
@@ -95,6 +117,46 @@ def evaluate_model(model, test_data, loss_ce, use_noisy=True):
     return test_loss, test_acc
 
 
+def save_plot(train_losses, val_losses, val_accs, test_accs, args):
+    """Save training and validation metrics plots"""
+    plt.figure(figsize=(12, 5))
+    
+    plt.subplot(1, 2, 1)
+    plt.plot(train_losses, label='Train Loss')
+    plt.plot(val_losses, label='Val Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.title('Training and Validation Loss')
+    
+    plt.subplot(1, 2, 2)
+    plt.plot(val_accs, label='Val Accuracy')
+    plt.plot(test_accs, label='Test Accuracy')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy (%)')
+    plt.legend()
+    plt.title('Validation and Test Accuracy')
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(args.checkpoint_dir, 'training_metrics.png'))
+
+
+def save_checkpoint(state, is_best, checkpoint_dir):
+    """Save checkpoint"""
+    last_path = os.path.join(checkpoint_dir, 'last.pth.tar')
+    torch.save(state, last_path)
+    if is_best:
+        best_path = os.path.join(checkpoint_dir, 'best.pth.tar')
+        torch.save(state, best_path)
+
+
+def save_params(args, params_dict, checkpoint_dir):
+    """Save parameters to JSON file"""
+    params_path = os.path.join(checkpoint_dir, 'params.json')
+    with open(params_path, 'w') as f:
+        json.dump(params_dict, f, indent=4)
+
+
 def train_model(train_dataset, val_dataset, test_dataset, args, is_hyperparam_search=False):
     """Unified training function for both hyperparameter search and full training."""
     # Create dataloaders
@@ -122,6 +184,20 @@ def train_model(train_dataset, val_dataset, test_dataset, args, is_hyperparam_se
     test_acc = np.zeros(num_epochs)
     best_acc = 0.0
     
+    # Create checkpoint directory if it doesn't exist
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
+    
+    # Save parameters
+    params_dict = {
+        'class_num': args.class_num,
+        'learning_rate': args.lr,
+        'batch_size': args.batch_size,
+        'use_noisy': args.use_noisy,
+        'use_multi_angle': args.use_multi_angle,
+        'epoch': args.epoch
+    }
+    save_params(args, params_dict, args.checkpoint_dir)
+    
     # Training loop
     for epoch in range(num_epochs):
         print(f"\nEpoch: {epoch}")
@@ -135,29 +211,39 @@ def train_model(train_dataset, val_dataset, test_dataset, args, is_hyperparam_se
         print(f'Val Loss: {val_loss[epoch]:.6f} | Val Acc: {val_acc[epoch]:.2f}%')
         
         # Keep track of best model based on validation accuracy
-        if val_acc[epoch] > best_acc:
+        is_best = val_acc[epoch] > best_acc
+        if is_best:
             best_acc = val_acc[epoch]
-            if not is_hyperparam_search:
-                save_dir = f'result/params/train_mmwave_processed_{"noisy" if args.use_noisy else "sim"}/'
-                os.makedirs(save_dir, exist_ok=True)
-                torch.save(model.state_dict(), f'{save_dir}/model_best.pth')
         
         # Evaluate on test set periodically
-        if is_hyperparam_search or (epoch + 1) % 20 == 0 or epoch == num_epochs - 1:
+        if is_hyperparam_search or (epoch + 1) % 10 == 0 or epoch == num_epochs - 1:
             test_loss[epoch], test_acc[epoch] = evaluate_model(model, test_data, loss_ce, args.use_noisy)
             print(f'Test Loss: {test_loss[epoch]:.6f} | Test Acc: {test_acc[epoch]:.2f}%')
         
-        scheduler.step()
+        # Save checkpoint (for full training only)
+        if not is_hyperparam_search:
+            state = {
+                'epoch': epoch + 1,
+                'state_dict': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'val_acc': val_acc[epoch],
+                'test_acc': test_acc[epoch] if test_acc[epoch] != 0 else None,
+                'train_loss': train_loss[:epoch+1].tolist(),
+                'val_loss': val_loss[:epoch+1].tolist(),
+                'val_acc_history': val_acc[:epoch+1].tolist(),
+                'test_acc_history': test_acc[:epoch+1].tolist(),
+                'args': vars(args)
+            }
+            save_checkpoint(state, is_best, args.checkpoint_dir)
+            
+            # Update plot
+            save_plot(train_loss[:epoch+1], val_loss[:epoch+1], val_acc[:epoch+1], test_acc[:epoch+1], args)
         
-        # Save final model (only in full training)
-        if not is_hyperparam_search and epoch >= num_epochs - 1:
-            save_dir = f'result/params/train_mmwave_processed_{"noisy" if args.use_noisy else "sim"}/'
-            os.makedirs(save_dir, exist_ok=True)
-            torch.save(model.state_dict(), f'{save_dir}/model_final.pth')
+        scheduler.step()
     
     if not is_hyperparam_search:
         # Save metrics for full training
-        save_dir = f'result/learning_curve/train_mmwave_processed_{"noisy" if args.use_noisy else "sim"}/'
+        save_dir = os.path.join(args.checkpoint_dir, 'metrics')
         os.makedirs(save_dir, exist_ok=True)
         sio.savemat(f'{save_dir}/metrics.mat', {
             'train_loss': train_loss,
@@ -170,11 +256,9 @@ def train_model(train_dataset, val_dataset, test_dataset, args, is_hyperparam_se
     return best_acc if is_hyperparam_search else None
 
 
-def hyperparameter_search(train_dataset, val_dataset):
+def hyperparameter_search(train_dataset, val_dataset, test_dataset, args):
     """Search for best hyperparameters."""
     # Define hyperparameter search space
-    # batch_sizes = [64, 128, 256]
-    # learning_rates = [0.001, 0.01, 0.1]
     batch_sizes = [128]
     learning_rates = [0.0001, 0.0005, 0.001]
     
@@ -185,23 +269,22 @@ def hyperparameter_search(train_dataset, val_dataset):
     }
     
     # Create results directory
-    results_dir = 'result/hyperparam_search'
+    results_dir = os.path.join(args.checkpoint_dir, 'hyperparam_search')
     os.makedirs(results_dir, exist_ok=True)
     results = []
     
     print("Starting Hyperparameter Search...")
-    # Create a base args object for hyperparameter search
-    args = parse_opts()
     
     for batch_size, lr in itertools.product(batch_sizes, learning_rates):
         print(f"\nTrying batch_size={batch_size}, lr={lr}")
         
-        # Update args with current hyperparameters
-        args.batch_size = batch_size
-        args.lr = lr
+        # Create temporary args object for this configuration
+        temp_args = argparse.Namespace(**vars(args))
+        temp_args.batch_size = batch_size
+        temp_args.lr = lr
         
         # Train and evaluate
-        acc = train_model(train_dataset, val_dataset, train_dataset, args, is_hyperparam_search=True)
+        acc = train_model(train_dataset, val_dataset, test_dataset, temp_args, is_hyperparam_search=True)
         
         results.append({
             'batch_size': batch_size,
@@ -223,14 +306,14 @@ def hyperparameter_search(train_dataset, val_dataset):
     print("\nHyperparameter Search Results:")
     print(f"Best batch_size: {best_params['batch_size']}")
     print(f"Best learning rate: {best_params['lr']}")
-    print(f"Best test accuracy: {best_params['accuracy']:.2f}%")
+    print(f"Best validation accuracy: {best_params['accuracy']:.2f}%")
     
     return best_params
 
 
 if __name__ == "__main__":
     # Parse command line arguments
-    args = parse_opts()
+    args = parse_args()
     starttime = datetime.datetime.now()
     
     # Log angle choice
@@ -238,6 +321,9 @@ if __name__ == "__main__":
         print("Using data from all angles (0, 90, 180, 270)")
     else:
         print("Using data from only 90-degree angle")
+    
+    # Create output directory
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
     
     # Load datasets
     train_dataset = XRFProcessedDataset(split='train', use_multi_angle=args.use_multi_angle)
@@ -247,7 +333,7 @@ if __name__ == "__main__":
     if args.do_search:
         print("Starting hyperparameter search...")
         # Perform hyperparameter search
-        best_params = hyperparameter_search(train_dataset, val_dataset)
+        best_params = hyperparameter_search(train_dataset, val_dataset, test_dataset, args)
         
         # Update args with best parameters
         args.batch_size = best_params['batch_size']
@@ -258,6 +344,14 @@ if __name__ == "__main__":
     else:
         print("Skipping hyperparameter search, using provided parameters...")
         print(f"Using batch_size={args.batch_size}, lr={args.lr}")
+    
+    # Save model configuration
+    with open(os.path.join(args.checkpoint_dir, 'training_config.txt'), 'w') as f:
+        f.write(f"Learning rate: {args.lr}\n")
+        f.write(f"Batch size: {args.batch_size}\n")
+        f.write(f"Use noisy data: {args.use_noisy}\n")
+        f.write(f"Use multi-angle data: {args.use_multi_angle}\n")
+        f.write(f"Number of epochs: {args.epoch}\n")
     
     # Perform full training
     train_model(train_dataset, val_dataset, test_dataset, args, is_hyperparam_search=False)

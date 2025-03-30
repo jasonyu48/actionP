@@ -14,7 +14,7 @@ def parse_opts():
                         help='Use noisy data for training (default: True)')
     parser.add_argument('--do_search', action='store_true', default=False,
                         help='Perform hyperparameter search before training (default: False)')
-    parser.add_argument('--use_multi_angle', action='store_true', default=True,
+    parser.add_argument('--use_multi_angle', action='store_true', default=False,
                         help='Use data from all angles (0, 90, 180, 270) instead of just 90 degrees (default: True)')
 
     args = parser.parse_args()
