@@ -62,8 +62,8 @@ def crop_around_peak(data, target_idx, window_size=15):
 
 def process_focus_data():
     # Base directory containing all action types
-    base_dir = '/weka/scratch/rzhao36/lwang/datasets/HOI/datasets/focus'
-    output_base_dir = 'Focus_processed_multi_angle'
+    base_dir = '/weka/scratch/rzhao36/lwang/datasets/HOI/RealAction/datasets/focus'
+    output_base_dir = '/scratch/tshu2/jyu197/Focus_processed_multi_angle_rfid_real'
     
     # Create output directory if it doesn't exist
     if not os.path.exists(output_base_dir):

@@ -60,7 +60,7 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
     
 class SpecEncoder(nn.Module):
-    def __init__(self, num_channels, input_channels=1, input_size=(31, 32)):
+    def __init__(self, num_channels, input_channels=1, input_size=(128, 32)):
         super(SpecEncoder, self).__init__()
         self.layers = nn.Sequential(
             nn.Conv2d(in_channels=input_channels, out_channels=num_channels, kernel_size=3, stride=1, padding=1),

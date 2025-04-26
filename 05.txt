@@ -1,0 +1,163 @@
+Loaded 358 object labels for close_0
+Loaded 358 object labels for close_90
+Loaded 358 object labels for close_180
+Loaded 358 object labels for close_270
+Loaded 358 object labels for open_0
+Loaded 358 object labels for open_90
+Loaded 358 object labels for open_180
+Loaded 358 object labels for open_270
+Loaded 358 object labels for pick_up_0
+Loaded 358 object labels for pick_up_90
+Loaded 358 object labels for pick_up_180
+Loaded 358 object labels for pick_up_270
+Loaded 358 object labels for put_down_0
+Loaded 358 object labels for put_down_90
+Loaded 358 object labels for put_down_180
+Loaded 358 object labels for put_down_270
+Loaded 358 object labels for sit_down_0
+Loaded 358 object labels for sit_down_90
+Loaded 358 object labels for sit_down_180
+Loaded 358 object labels for sit_down_270
+Loaded 358 object labels for stand_up_0
+Loaded 358 object labels for stand_up_90
+Loaded 358 object labels for stand_up_180
+Loaded 358 object labels for stand_up_270
+Loaded 358 object labels for wipe_0
+Loaded 358 object labels for wipe_90
+Loaded 358 object labels for wipe_180
+Loaded 358 object labels for wipe_270
+Loaded 7014 train samples from 7 action types
+  - 7014 samples have noisy radar data available
+  - 7014 samples have noisy RFID data available
+  - Samples per angle: {'0': 1834, '90': 1778, '180': 1708, '270': 1694}
+  - Using all angles
+  - Using noisy data when available
+  - Samples per action class:
+      close: 1002
+      open: 1002
+      pick_up: 1002
+      put_down: 1002
+      sit_down: 1002
+      stand_up: 1002
+      wipe: 1002
+  - Samples per object class:
+      Object 0: 1133
+      Object 1: 1244
+      Object 2: 1102
+      Object 3: 1194
+      Object 4: 1188
+      Object 5: 1153
+Action types: ['close', 'open', 'pick_up', 'put_down', 'sit_down', 'stand_up', 'wipe']
+Object names: ['bottle', 'pen', 'microwave', 'cabinet', 'phone', 'chair', 'book', 'table']
+Loaded 358 object labels for close_0
+Loaded 358 object labels for close_90
+Loaded 358 object labels for close_180
+Loaded 358 object labels for close_270
+Loaded 358 object labels for open_0
+Loaded 358 object labels for open_90
+Loaded 358 object labels for open_180
+Loaded 358 object labels for open_270
+Loaded 358 object labels for pick_up_0
+Loaded 358 object labels for pick_up_90
+Loaded 358 object labels for pick_up_180
+Loaded 358 object labels for pick_up_270
+Loaded 358 object labels for put_down_0
+Loaded 358 object labels for put_down_90
+Loaded 358 object labels for put_down_180
+Loaded 358 object labels for put_down_270
+Loaded 358 object labels for sit_down_0
+Loaded 358 object labels for sit_down_90
+Loaded 358 object labels for sit_down_180
+Loaded 358 object labels for sit_down_270
+Loaded 358 object labels for stand_up_0
+Loaded 358 object labels for stand_up_90
+Loaded 358 object labels for stand_up_180
+Loaded 358 object labels for stand_up_270
+Loaded 358 object labels for wipe_0
+Loaded 358 object labels for wipe_90
+Loaded 358 object labels for wipe_180
+Loaded 358 object labels for wipe_270
+Loaded 1505 val samples from 7 action types
+  - 1505 samples have noisy radar data available
+  - 1505 samples have noisy RFID data available
+  - Samples per angle: {'0': 343, '90': 350, '180': 406, '270': 406}
+  - Using all angles
+  - Using noisy data when available
+  - Samples per action class:
+      close: 215
+      open: 215
+      pick_up: 215
+      put_down: 215
+      sit_down: 215
+      stand_up: 215
+      wipe: 215
+  - Samples per object class:
+      Object 0: 228
+      Object 1: 251
+      Object 2: 242
+      Object 3: 258
+      Object 4: 286
+      Object 5: 240
+Action types: ['close', 'open', 'pick_up', 'put_down', 'sit_down', 'stand_up', 'wipe']
+Object names: ['bottle', 'pen', 'microwave', 'cabinet', 'phone', 'chair', 'book', 'table']
+The total size of the model is: 58.695MB
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 
+Checkpoint Directory exists! 

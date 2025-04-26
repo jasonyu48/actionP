@@ -22,3 +22,7 @@ lw_model_multi_angle
 Focus_processed_multi_angle
 xrf555_processed_multi_angle
 *single_angle
+cubelearn_model*
+hoi_model_checkpoints*
+transformer_model_multi_angle*
+transformer_model_single*

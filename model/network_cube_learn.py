@@ -45,7 +45,7 @@ class Doppler_Fourier_Net(nn.Module):
 
 class Range_Fourier_Net_Small(nn.Module):
     def __init__(self):
-        super(Range_Fourier_Net, self).__init__()
+        super(Range_Fourier_Net_Small, self).__init__()
         self.range_nn = CplxLinear(128, 128, bias = False)
         range_weights = np.zeros((128, 128), dtype = np.complex64)
         for j in range(0, 128):
@@ -60,7 +60,7 @@ class Range_Fourier_Net_Small(nn.Module):
 
 class Doppler_Fourier_Net_Small(nn.Module):
     def __init__(self):
-        super(Doppler_Fourier_Net, self).__init__()
+        super(Doppler_Fourier_Net_Small, self).__init__()
         self.doppler_nn = CplxLinear(64, 64, bias = False)
         doppler_weights = np.zeros((64, 64), dtype=np.complex64)
         for j in range(0, 64):
@@ -83,6 +83,26 @@ class AOA_Fourier_Net(nn.Module):
         self.aoa_nn = CplxLinear(8, 64, bias = False)
         aoa_weights = np.zeros((64, 8), dtype=np.complex64)
         for j in range(8):
+            for h in range(64):
+                hh = h + 32
+                if hh >= 64:
+                    hh = hh - 64
+                h_idx = h
+                aoa_weights[h_idx][j] = np.exp(-1j * 2 * np.pi * (j *hh / 64))
+
+        aoa_weights = TensorToCplx()(torch.view_as_real(torch.from_numpy(aoa_weights)))
+        self.aoa_nn.weight = CplxParameter(aoa_weights)
+    
+    def forward(self, x):
+        x = self.aoa_nn(x)
+        return x
+    
+class AOA_Fourier_Net_new(nn.Module):
+    def __init__(self):
+        super(AOA_Fourier_Net_new, self).__init__()
+        self.aoa_nn = CplxLinear(12, 64, bias = False)
+        aoa_weights = np.zeros((64, 12), dtype=np.complex64)
+        for j in range(12):
             for h in range(64):
                 hh = h + 32
                 if hh >= 64:
@@ -529,6 +549,69 @@ class DAT_3DCNN(nn.Module):
 class RDAT_3DCNNLSTM(nn.Module):
     def __init__(self):
         super(RDAT_3DCNNLSTM, self).__init__()
+        self.range_net = Range_Fourier_Net()
+        self.doppler_net = Doppler_Fourier_Net()
+        self.aoa_net = AOA_Fourier_Net_new()
+        self.cplx_transpose = CplxToCplx[torch.transpose]
+        self.conv1 = nn.Conv3d(1, 4, 3)
+        self.bn1 = nn.BatchNorm3d(4)
+        self.conv2 = nn.Conv3d(4, 8, 3)
+        self.bn2 = nn.BatchNorm3d(8)
+        self.conv3 = nn.Conv3d(8, 16, 3)
+        self.bn3 = nn.BatchNorm3d(16)
+        self.maxpool = nn.MaxPool3d(2, ceil_mode = True)
+        self.maxpool2 = nn.MaxPool3d(3, ceil_mode = True)
+        self.lstm = nn.LSTM(4704, 512, 1, batch_first = True)
+        self.fc_2 = nn.Linear(512, 128)
+        self.fc_3 = nn.Linear(128, 7)
+
+    def forward(self, x): #input shape: batchsize, time (radar frames), 128 (chirps), 12 (antennas), 256
+        batch_size, time_steps = x.shape[0], x.shape[1]
+        # x = x[:,:,:,0:8,:]
+        # x = x.contiguous()
+        
+        # Process each radar frame
+        x = self.range_net(x)
+        x = x.view(batch_size*time_steps, 128, 12, 256)
+        x = self.cplx_transpose(1,3)(x) #(batchsize*time_steps, 256, 12, 128)
+        x = self.doppler_net(x)
+        x = self.cplx_transpose(2,3)(x) #(batchsize*time_steps, 256, 128, 12)
+        x = self.aoa_net(x) #(batchsize*time_steps, 256, 128, 64)
+        x = CplxModulus()(x)
+        
+        # Reshape with time steps preserved
+        x = x.view(batch_size * time_steps, 1, 256, 128, 64)
+        
+        # 3D CNN processing
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = F.relu(x)
+        x = self.maxpool(x)
+        x = self.conv2(x)
+        x = self.bn2(x)
+        x = F.relu(x)
+        x = self.maxpool2(x)
+        x = self.conv3(x)
+        x = self.bn3(x)
+        x = F.relu(x)
+        x = self.maxpool2(x)
+        
+        # Reshape for LSTM with variable time steps
+        x = x.view(batch_size, time_steps, 4704)
+        
+        # LSTM processing
+        output, (h_n, c_n) = self.lstm(x)
+        x = output[:, -1, :]  # Use the last time step output
+        
+        # Final classification layers
+        x = self.fc_2(x)
+        x = F.relu(x)
+        x = self.fc_3(x)
+        return x
+    
+class RDAT_3DCNNLSTM_original(nn.Module):
+    def __init__(self):
+        super(RDAT_3DCNNLSTM_original, self).__init__()
         self.range_net = Range_Fourier_Net_Small()
         self.doppler_net = Doppler_Fourier_Net_Small()
         self.aoa_net = AOA_Fourier_Net()
@@ -544,15 +627,15 @@ class RDAT_3DCNNLSTM(nn.Module):
         self.fc_2 = nn.Linear(512, 128)
         self.fc_3 = nn.Linear(128, 12)
 
-    def forward(self, x): #input shape: batchsize, time (radar frames), 128 (chirps), 12 (antennas), 256
+    def forward(self, x):
         x = x[:,:,:,0:8,:]
         x = x.contiguous()
         x = self.range_net(x)
         x = x.view(-1, 64, 8, 128)
-        x = self.cplx_transpose(1,3)(x)
+        x = self.cplx_transpose(1,3)(x) #(batchsize*time_steps, 128, 8, 64)
         x = self.doppler_net(x)
-        x = self.cplx_transpose(2,3)(x)
-        x = self.aoa_net(x)
+        x = self.cplx_transpose(2,3)(x) #(batchsize*time_steps, 128, 64, 8)
+        x = self.aoa_net(x) #(batchsize*time_steps, 128, 64, 64)
         x = CplxModulus()(x)
         x = x.view(-1, 1, 128, 64, 64)
         x = self.conv1(x)

@@ -24,3 +24,37 @@ Hyperparameter Search Results:
 2025-03-21 12:50:02,676 - Focus_Training - INFO - LR: 1e-05, BS: 4, Val Acc: 0.3241                                                                                      
 2025-03-21 12:50:02,677 - Focus_Training - INFO -                                                                                                                        
 Best Configuration: LR=5e-06, BS=16, Val Acc=0.5648
+
+Cubelearn
+Hyperparameter Search Results:                                                                                               
+2025-04-03 21:52:14,798 - CubeLearn_Training - INFO - LR: 1e-05, BS: 8, Val Acc: 0.1987                                      
+2025-04-03 21:52:14,798 - CubeLearn_Training - INFO - LR: 5e-06, BS: 8, Val Acc: 0.1727                                      
+2025-04-03 21:52:14,798 - CubeLearn_Training - INFO - LR: 1e-06, BS: 8, Val Acc: 0.1506                                                                                                           
+Best Configuration: LR=1e-05, BS=8, Val Acc=0.1987 
+
+transformer:
+Hyperparameter Search Results:
+2025-04-05 18:34:44,009 - Transformer_Training - INFO - LR: 0.0001, BS: 32, Val Acc: 0.4532
+2025-04-05 18:34:44,009 - Transformer_Training - INFO - LR: 0.0001, BS: 8, Val Acc: 0.4247
+2025-04-05 18:34:44,009 - Transformer_Training - INFO - LR: 0.0001, BS: 16, Val Acc: 0.3831
+2025-04-05 18:34:44,009 - Transformer_Training - INFO - LR: 1e-05, BS: 8, Val Acc: 0.3481
+2025-04-05 18:34:44,009 - Transformer_Training - INFO - LR: 2e-06, BS: 8, Val Acc: 0.3156
+2025-04-05 18:34:44,009 - Transformer_Training - INFO - LR: 1e-05, BS: 32, Val Acc: 0.3065
+2025-04-05 18:34:44,009 - Transformer_Training - INFO - LR: 1e-05, BS: 16, Val Acc: 0.3052                                                                                                                                                                                            
+2025-04-05 18:34:44,009 - Transformer_Training - INFO - LR: 2e-06, BS: 16, Val Acc: 0.2857
+2025-04-05 18:34:44,009 - Transformer_Training - INFO - LR: 2e-06, BS: 32, Val Acc: 0.2727
+2025-04-05 19:14:41,557 - Transformer_Training - INFO - LR: 0.0001, BS: 32, Val Acc: 0.4403
+2025-04-05 19:14:41,557 - Transformer_Training - INFO - LR: 0.0001, BS: 128, Val Acc: 0.3974
+2025-04-05 19:14:41,557 - Transformer_Training - INFO - LR: 0.0001, BS: 64, Val Acc: 0.3779
+2025-04-05 19:14:41,557 - Transformer_Training - INFO - LR: 0.0005, BS: 32, Val Acc: 0.3545
+2025-04-05 19:14:41,557 - Transformer_Training - INFO - LR: 0.0005, BS: 128, Val Acc: 0.3351
+2025-04-05 19:14:41,557 - Transformer_Training - INFO - LR: 0.001, BS: 128, Val Acc: 0.3000
+2025-04-05 19:14:41,557 - Transformer_Training - INFO - LR: 0.001, BS: 32, Val Acc: 0.2961
+2025-04-05 19:14:41,557 - Transformer_Training - INFO - LR: 0.0005, BS: 64, Val Acc: 0.2922
+2025-04-05 19:14:41,557 - Transformer_Training - INFO - LR: 0.001, BS: 64, Val Acc: 0.2857
+2025-04-05 23:11:30,640 - Transformer_Training - INFO - LR: 0.0001, BS: 32, Val Acc: 0.4588               
+2025-04-05 23:11:30,640 - Transformer_Training - INFO - LR: 5e-05, BS: 32, Val Acc: 0.3610                
+2025-04-05 23:11:30,640 - Transformer_Training - INFO - LR: 0.0005, BS: 32, Val Acc: 0.3462   
+2025-04-05 19:14:41,557 - Transformer_Training - INFO - 
+Best Configuration: LR=0.0001, BS=32, Val Acc=0.4403
+2025-04-05 19:14:43,906 - Transformer_Training - INFO - Using best hyperparameters: LR=0.0001, BS=32
