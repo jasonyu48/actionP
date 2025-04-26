@@ -297,8 +297,9 @@ def load_pretrained_model(model, pretrained_path, freeze_encoder=False):
 
 class MixedDataLoader:
     """
-    Custom dataloader to combine simulated and real datasets in a single epoch.
+    Custom dataloader that alternates between simulated and real datasets in a single epoch.
     Each sample is used exactly once per epoch, and sim data is reshuffled between epochs.
+    Batches are kept separate (not mixed) to avoid dimension mismatches.
     """
     def __init__(self, sim_dataset, real_dataset, batch_size, shuffle=True, num_workers=1, collate_fn=None, drop_last=False):
         self.sim_dataset = sim_dataset
@@ -308,91 +309,68 @@ class MixedDataLoader:
         self.collate_fn = collate_fn
         self.drop_last = drop_last
         
-        # Calculate total number of samples
-        self.total_samples = len(sim_dataset) + len(real_dataset)
-        self.length = (self.total_samples + batch_size - 1) // batch_size if not drop_last else self.total_samples // batch_size
+        # Calculate total number of batches (not mixing within batches)
+        sim_batches = (len(sim_dataset) + batch_size - 1) // batch_size if not drop_last else len(sim_dataset) // batch_size
+        real_batches = (len(real_dataset) + batch_size - 1) // batch_size if not drop_last else len(real_dataset) // batch_size
+        self.length = sim_batches + real_batches
         
-        logger.info(f"Created MixedDataLoader with {len(sim_dataset)} sim samples + {len(real_dataset)} real samples")
+        logger.info(f"Created MixedDataLoader with {len(sim_dataset)} sim samples ({sim_batches} batches) + "
+                   f"{len(real_dataset)} real samples ({real_batches} batches)")
         logger.info(f"Total batches per epoch: {self.length} (batch size: {batch_size})")
     
     def __iter__(self):
-        # Create a list of all samples with their source and index
-        combined_samples = []
+        # Create indices for both datasets
+        sim_indices = list(range(len(self.sim_dataset)))
+        real_indices = list(range(len(self.real_dataset)))
         
-        # Add all sim samples
-        for i in range(len(self.sim_dataset)):
-            combined_samples.append(('sim', i))
-        
-        # Add all real samples
-        for i in range(len(self.real_dataset)):
-            combined_samples.append(('real', i))
-        
-        # Shuffle all samples together
+        # Shuffle indices if requested
         if self.shuffle:
-            np.random.shuffle(combined_samples)
+            np.random.shuffle(sim_indices)
+            np.random.shuffle(real_indices)
         
-        # Create batches
-        self.batches = []
-        for i in range(0, len(combined_samples), self.batch_size):
-            if i + self.batch_size > len(combined_samples) and self.drop_last:
+        # Create batches for sim data
+        sim_batches = []
+        for i in range(0, len(sim_indices), self.batch_size):
+            if i + self.batch_size > len(sim_indices) and self.drop_last:
                 continue
-            batch = combined_samples[i:i + self.batch_size]
-            self.batches.append(batch)
+            batch_indices = sim_indices[i:i + self.batch_size]
+            batch_samples = [self.sim_dataset[idx] for idx in batch_indices]
+            if self.collate_fn:
+                batch_data = self.collate_fn(batch_samples)
+                # Add source information
+                batch_data['_source'] = 'sim'
+                sim_batches.append(batch_data)
+            else:
+                sim_batches.append((batch_samples, 'sim'))
         
-        self.batch_idx = 0
+        # Create batches for real data
+        real_batches = []
+        for i in range(0, len(real_indices), self.batch_size):
+            if i + self.batch_size > len(real_indices) and self.drop_last:
+                continue
+            batch_indices = real_indices[i:i + self.batch_size]
+            batch_samples = [self.real_dataset[idx] for idx in batch_indices]
+            if self.collate_fn:
+                batch_data = self.collate_fn(batch_samples)
+                # Add source information
+                batch_data['_source'] = 'real'
+                real_batches.append(batch_data)
+            else:
+                real_batches.append((batch_samples, 'real'))
+        
+        # Combine and shuffle the batches
+        all_batches = sim_batches + real_batches
+        if self.shuffle:
+            np.random.shuffle(all_batches)
+        
+        self.batches = iter(all_batches)
         return self
     
     def __next__(self):
-        if self.batch_idx >= len(self.batches):
+        try:
+            return next(self.batches)
+        except StopIteration:
             raise StopIteration
-        
-        batch = self.batches[self.batch_idx]
-        self.batch_idx += 1
-        
-        # Separate sim and real samples
-        sim_samples = []
-        real_samples = []
-        
-        for source, idx in batch:
-            if source == 'sim':
-                sim_samples.append(self.sim_dataset[idx])
-            else:
-                real_samples.append(self.real_dataset[idx])
-        
-        # Create batch dictionary
-        batch_dict = {}
-        
-        # Process sim samples if any
-        if sim_samples:
-            sim_batch = self.collate_fn(sim_samples)
-            for key in sim_batch:
-                if key not in batch_dict:
-                    batch_dict[key] = sim_batch[key]
-                else:
-                    # If the key already exists (shouldn't happen for first batch), need custom handling
-                    pass
-        
-        # Process real samples if any
-        if real_samples:
-            real_batch = self.collate_fn(real_samples)
-            for key in real_batch:
-                if key not in batch_dict:
-                    batch_dict[key] = real_batch[key]
-                else:
-                    # We need to concatenate tensors for keys that appear in both batches
-                    if isinstance(batch_dict[key], (list, tuple)) and isinstance(real_batch[key], (list, tuple)):
-                        # Handle lists of tensors (like radar_data)
-                        for i in range(len(batch_dict[key])):
-                            if isinstance(batch_dict[key][i], torch.Tensor) and isinstance(real_batch[key][i], torch.Tensor):
-                                batch_dict[key][i] = torch.cat([batch_dict[key][i], real_batch[key][i]], dim=0)
-                    elif isinstance(batch_dict[key], torch.Tensor) and isinstance(real_batch[key], torch.Tensor):
-                        # Handle simple tensors (like labels)
-                        batch_dict[key] = torch.cat([batch_dict[key], real_batch[key]], dim=0)
-        
-        # Add metadata about source
-        batch_dict['_sources'] = [source for source, _ in batch]
-        
-        return batch_dict
     
     def __len__(self):
         return self.length
@@ -531,6 +509,12 @@ def train_and_evaluate(model, train_dataset, val_dataset, optimizer, scheduler, 
         # Use tqdm for progress bar
         with tqdm(total=len(train_dataloader), desc=f"Epoch {epoch+1}/{args.num_epochs} [Train]") as pbar:
             for batch_idx, batch in enumerate(train_dataloader):
+                # Identify data source in mixed dataset
+                is_sim_batch = False
+                if isinstance(train_dataset, tuple):
+                    if '_source' in batch and batch['_source'] == 'sim':
+                        is_sim_batch = True
+                
                 # Process data based on batch type (noisy or clean)
                 if args.use_noisy:
                     mm_data = [
@@ -578,19 +562,13 @@ def train_and_evaluate(model, train_dataset, val_dataset, optimizer, scheduler, 
                 epoch_samples += batch_size
                 
                 # Track separate losses for sim and real data in mixed mode
-                if isinstance(train_dataset, tuple) and '_sources' in batch:
-                    # Count samples from each source
-                    sources = batch['_sources']
-                    sim_count = sum(1 for s in sources if s == 'sim')
-                    real_count = sum(1 for s in sources if s == 'real')
-                    
-                    # Allocate loss proportionally (approximate)
-                    if sim_count > 0:
-                        epoch_sim_loss += batch_loss.item() * sim_count
-                        epoch_sim_samples += sim_count
-                    if real_count > 0:
-                        epoch_real_loss += batch_loss.item() * real_count
-                        epoch_real_samples += real_count
+                if isinstance(train_dataset, tuple):
+                    if is_sim_batch:
+                        epoch_sim_loss += batch_loss.item() * batch_size
+                        epoch_sim_samples += batch_size
+                    else:
+                        epoch_real_loss += batch_loss.item() * batch_size
+                        epoch_real_samples += batch_size
                 
                 # Track predictions
                 _, action_preds = torch.max(action_output, 1)
@@ -617,7 +595,7 @@ def train_and_evaluate(model, train_dataset, val_dataset, optimizer, scheduler, 
             sim_losses.append(sim_loss)
             real_losses.append(real_loss)
             
-            logger.info(f"Sim Loss: {sim_loss:.4f}, Real Loss: {real_loss:.4f}")
+            logger.info(f"Sim Loss: {sim_loss:.4f} ({epoch_sim_samples} samples), Real Loss: {real_loss:.4f} ({epoch_real_samples} samples)")
         
         # Evaluate on validation set
         val_loss, val_metrics = evaluate(model, val_dataloader, device, args, loss_coef)
