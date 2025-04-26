@@ -296,70 +296,107 @@ def load_pretrained_model(model, pretrained_path, freeze_encoder=False):
     return model
 
 class MixedDataLoader:
-    """Custom dataloader to interleave batches from simulated and real datasets"""
+    """
+    Custom dataloader to combine simulated and real datasets in a single epoch.
+    Each sample is used exactly once per epoch, and sim data is reshuffled between epochs.
+    """
     def __init__(self, sim_dataset, real_dataset, batch_size, shuffle=True, num_workers=1, collate_fn=None, drop_last=False):
-        self.sim_loader = DataLoader(
-            sim_dataset, 
-            batch_size=batch_size, 
-            shuffle=shuffle,
-            num_workers=num_workers,
-            collate_fn=collate_fn,
-            pin_memory=True,
-            drop_last=drop_last
-        )
+        self.sim_dataset = sim_dataset
+        self.real_dataset = real_dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.collate_fn = collate_fn
+        self.drop_last = drop_last
         
-        self.real_loader = DataLoader(
-            real_dataset, 
-            batch_size=batch_size, 
-            shuffle=shuffle,
-            num_workers=num_workers,
-            collate_fn=collate_fn,
-            pin_memory=True,
-            drop_last=drop_last
-        )
+        # Calculate total number of samples
+        self.total_samples = len(sim_dataset) + len(real_dataset)
+        self.length = (self.total_samples + batch_size - 1) // batch_size if not drop_last else self.total_samples // batch_size
         
-        # Calculate length - use the longer dataloader
-        self.length = max(len(self.sim_loader), len(self.real_loader))
-        
-        # Create iterators
-        self.sim_iter = iter(self.sim_loader)
-        self.real_iter = iter(self.real_loader)
-        
-        # Adaptive mixing weights
-        self.sim_weight = 0.5  # Start with equal weighting
-        
+        logger.info(f"Created MixedDataLoader with {len(sim_dataset)} sim samples + {len(real_dataset)} real samples")
+        logger.info(f"Total batches per epoch: {self.length} (batch size: {batch_size})")
+    
     def __iter__(self):
-        # Reset iterators at the start of each epoch
-        self.sim_iter = iter(self.sim_loader)
-        self.real_iter = iter(self.real_loader)
+        # Create a list of all samples with their source and index
+        combined_samples = []
+        
+        # Add all sim samples
+        for i in range(len(self.sim_dataset)):
+            combined_samples.append(('sim', i))
+        
+        # Add all real samples
+        for i in range(len(self.real_dataset)):
+            combined_samples.append(('real', i))
+        
+        # Shuffle all samples together
+        if self.shuffle:
+            np.random.shuffle(combined_samples)
+        
+        # Create batches
+        self.batches = []
+        for i in range(0, len(combined_samples), self.batch_size):
+            if i + self.batch_size > len(combined_samples) and self.drop_last:
+                continue
+            batch = combined_samples[i:i + self.batch_size]
+            self.batches.append(batch)
+        
+        self.batch_idx = 0
         return self
     
     def __next__(self):
-        # Weighted random selection of dataset
-        if np.random.random() < self.sim_weight:
-            try:
-                return next(self.sim_iter), 'sim'
-            except StopIteration:
-                # If sim is exhausted, reset it and return real
-                self.sim_iter = iter(self.sim_loader)
-                return next(self.real_iter), 'real'
-        else:
-            try:
-                return next(self.real_iter), 'real'
-            except StopIteration:
-                # If real is exhausted, reset it and return sim
-                self.real_iter = iter(self.real_loader)
-                return next(self.sim_iter), 'sim'
+        if self.batch_idx >= len(self.batches):
+            raise StopIteration
+        
+        batch = self.batches[self.batch_idx]
+        self.batch_idx += 1
+        
+        # Separate sim and real samples
+        sim_samples = []
+        real_samples = []
+        
+        for source, idx in batch:
+            if source == 'sim':
+                sim_samples.append(self.sim_dataset[idx])
+            else:
+                real_samples.append(self.real_dataset[idx])
+        
+        # Create batch dictionary
+        batch_dict = {}
+        
+        # Process sim samples if any
+        if sim_samples:
+            sim_batch = self.collate_fn(sim_samples)
+            for key in sim_batch:
+                if key not in batch_dict:
+                    batch_dict[key] = sim_batch[key]
+                else:
+                    # If the key already exists (shouldn't happen for first batch), need custom handling
+                    pass
+        
+        # Process real samples if any
+        if real_samples:
+            real_batch = self.collate_fn(real_samples)
+            for key in real_batch:
+                if key not in batch_dict:
+                    batch_dict[key] = real_batch[key]
+                else:
+                    # We need to concatenate tensors for keys that appear in both batches
+                    if isinstance(batch_dict[key], (list, tuple)) and isinstance(real_batch[key], (list, tuple)):
+                        # Handle lists of tensors (like radar_data)
+                        for i in range(len(batch_dict[key])):
+                            if isinstance(batch_dict[key][i], torch.Tensor) and isinstance(real_batch[key][i], torch.Tensor):
+                                batch_dict[key][i] = torch.cat([batch_dict[key][i], real_batch[key][i]], dim=0)
+                    elif isinstance(batch_dict[key], torch.Tensor) and isinstance(real_batch[key], torch.Tensor):
+                        # Handle simple tensors (like labels)
+                        batch_dict[key] = torch.cat([batch_dict[key], real_batch[key]], dim=0)
+        
+        # Add metadata about source
+        batch_dict['_sources'] = [source for source, _ in batch]
+        
+        return batch_dict
     
     def __len__(self):
         return self.length
-    
-    def update_weights(self, sim_loss, real_loss):
-        """Adaptively update mixing weights based on relative loss magnitudes"""
-        total = sim_loss + real_loss
-        if total > 0:
-            self.sim_weight = real_loss / total  # More weight to dataset with higher loss
-    
+
 def train_and_evaluate(model, train_dataset, val_dataset, optimizer, scheduler, args, loss_coef):
     """Train the model and evaluate on validation set"""
     
@@ -377,7 +414,8 @@ def train_and_evaluate(model, train_dataset, val_dataset, optimizer, scheduler, 
             batch_size=args.batch_size,
             shuffle=True,
             num_workers=args.num_workers,
-            collate_fn=rfid_collate_fn
+            collate_fn=rfid_collate_fn,
+            drop_last=False
         )
         
         val_dataloader = DataLoader(
@@ -492,15 +530,7 @@ def train_and_evaluate(model, train_dataset, val_dataset, optimizer, scheduler, 
         
         # Use tqdm for progress bar
         with tqdm(total=len(train_dataloader), desc=f"Epoch {epoch+1}/{args.num_epochs} [Train]") as pbar:
-            for batch_idx, batch_data in enumerate(train_dataloader):
-                # Handle mixed dataset with separate batch structure
-                if isinstance(train_dataset, tuple):
-                    batch, batch_type = batch_data
-                    is_sim_batch = (batch_type == 'sim')
-                else:
-                    batch = batch_data
-                    is_sim_batch = False
-                
+            for batch_idx, batch in enumerate(train_dataloader):
                 # Process data based on batch type (noisy or clean)
                 if args.use_noisy:
                     mm_data = [
@@ -548,13 +578,19 @@ def train_and_evaluate(model, train_dataset, val_dataset, optimizer, scheduler, 
                 epoch_samples += batch_size
                 
                 # Track separate losses for sim and real data in mixed mode
-                if isinstance(train_dataset, tuple):
-                    if is_sim_batch:
-                        epoch_sim_loss += batch_loss.item() * batch_size
-                        epoch_sim_samples += batch_size
-                    else:
-                        epoch_real_loss += batch_loss.item() * batch_size
-                        epoch_real_samples += batch_size
+                if isinstance(train_dataset, tuple) and '_sources' in batch:
+                    # Count samples from each source
+                    sources = batch['_sources']
+                    sim_count = sum(1 for s in sources if s == 'sim')
+                    real_count = sum(1 for s in sources if s == 'real')
+                    
+                    # Allocate loss proportionally (approximate)
+                    if sim_count > 0:
+                        epoch_sim_loss += batch_loss.item() * sim_count
+                        epoch_sim_samples += sim_count
+                    if real_count > 0:
+                        epoch_real_loss += batch_loss.item() * real_count
+                        epoch_real_samples += real_count
                 
                 # Track predictions
                 _, action_preds = torch.max(action_output, 1)
@@ -582,9 +618,6 @@ def train_and_evaluate(model, train_dataset, val_dataset, optimizer, scheduler, 
             real_losses.append(real_loss)
             
             logger.info(f"Sim Loss: {sim_loss:.4f}, Real Loss: {real_loss:.4f}")
-            
-            # Update mixing weights for next epoch
-            train_dataloader.update_weights(sim_loss, real_loss)
         
         # Evaluate on validation set
         val_loss, val_metrics = evaluate(model, val_dataloader, device, args, loss_coef)
@@ -648,9 +681,9 @@ def train_and_evaluate(model, train_dataset, val_dataset, optimizer, scheduler, 
         save_plot(train_losses, val_losses, train_action_accs, val_action_accs, train_obj_accs, val_obj_accs, args)
     
     logger.info(f"Training completed. Best validation metric: {best_val_metric:.4f}")
-    BEST_ACTION_ACC = np.max(train_action_accs)
-    BEST_OBJ_ACC = np.max(train_obj_accs)
-    
+    BEST_ACTION_ACC = np.max(val_action_accs)
+    BEST_OBJ_ACC = np.max(val_obj_accs)
+
 def evaluate(model, dataloader, device, args, loss_coef):
     """Evaluate the model on the given dataloader"""
     model.eval()
