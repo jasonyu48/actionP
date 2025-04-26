@@ -51,7 +51,7 @@ def parse_args():
                         help='Use noisy data for training instead of simulated data')
     
     # Dataset selection and splitting strategy
-    parser.add_argument('--dataset_type', type=str, choices=['sim', 'real', 'mixed'], default='sim',
+    parser.add_argument('--dataset_type', type=str, choices=['sim', 'real', 'mixed'], default='real',
                         help='Type of dataset to use: simulated, real-world, or mixed')
     parser.add_argument('--split_strategy', type=str, choices=['default', 'angle-based', 'random-subset'], default='default',
                         help='Strategy for splitting data (default: 70/15/15 random split)')
@@ -88,7 +88,7 @@ def parse_args():
                         help='Number of workers for data loading')
     
     # Hardware and execution parameters
-    parser.add_argument('--checkpoint_dir', type=str, default='./hoi_model_checkpoints_loss_coef_0.3_neuron_num_64', 
+    parser.add_argument('--checkpoint_dir', type=str, default='./hoi_model_from_scratch', 
                         help='Directory to save checkpoints')
     parser.add_argument('--use_bf16', action='store_true', default=True, 
                         help='Use bfloat16 precision if available')
@@ -152,243 +152,213 @@ def save_plot(train_losses, val_losses, train_action_accs, val_action_accs, trai
     plt.tight_layout()
     plt.savefig(os.path.join(args.checkpoint_dir, 'training_metrics.png'))
 
-def hyperparameter_search(train_dataset, val_dataset, device, args):
+def get_datasets(args):
     """
-    Perform hyperparameter search to find optimal learning rate and batch size
+    Create datasets based on the specified type and splitting strategy
     
     Args:
-        train_dataset: Training dataset
-        val_dataset: Validation dataset
-        device: Device to run on
-        args: Command line arguments
+        args: Command line arguments containing dataset configuration
         
     Returns:
-        best_lr: Best learning rate
-        best_batch_size: Best batch size
-        best_loss_coef: Best loss coefficient for balancing action and object losses
+        train_dataset: Training dataset
+        val_dataset: Validation dataset
     """
-    # Hyperparameter search space
-    learning_rates = [1e-5, 5e-4, 1e-4]
-    batch_sizes = [32]
-    loss_coefs = [0.3, 0.5, 0.7]  # Object loss coefficients
-    
-    # Create results directory for the search
-    search_dir = os.path.join(args.checkpoint_dir, 'hyperparam_search')
-    if not os.path.exists(search_dir):
-        os.makedirs(search_dir)
+    if args.dataset_type == 'sim':
+        # Simulated data only
+        logger.info(f"Using simulated data with {args.split_strategy} splitting strategy")
         
-    # Initialize best values
-    best_val_metric = 0.0  # Will be the average of action and object accuracies
-    best_lr = None
-    best_batch_size = None
-    best_loss_coef = None
-    
-    # Number of epochs for each configuration
-    search_epochs = 3
-    
-    # Store results for plotting
-    results = []
-    
-    # Determine data type based on arguments
-    data_type = "noisy" if args.use_noisy else "sim"
-    logger.info(f"Hyperparameter search using {data_type} data")
-    
-    # Try all combinations
-    combos = list(itertools.product(learning_rates, batch_sizes, loss_coefs))
-    logger.info(f"Starting hyperparameter search with {len(combos)} combinations")
-    logger.info(f"Search space: LR={learning_rates}, BS={batch_sizes}, LOSS_COEF={loss_coefs}")
-    
-    for i, (lr, bs, loss_coef) in enumerate(combos):
-        logger.info(f"Testing combination {i+1}/{len(combos)}: LR={lr}, BS={bs}, LOSS_COEF={loss_coef}")
-        
-        # Create dataloaders with current batch size
-        train_dataloader = DataLoader(
-            train_dataset, 
-            batch_size=bs, 
-            shuffle=True,
-            num_workers=args.num_workers,
-            collate_fn=rfid_collate_fn,
-            pin_memory=True
+        train_dataset = FocusDatasetwithRFID(
+            base_dir=args.data_dir,
+            split='train',
+            use_multi_angle=args.use_multi_angle,
+            use_noisy=args.use_noisy,
+            split_strategy=args.split_strategy,
+            train_angles=args.train_angles,
+            val_angle=args.val_angle,
+            samples_per_class=args.samples_per_class
         )
         
-        val_dataloader = DataLoader(
-            val_dataset, 
-            batch_size=bs,
-            shuffle=False,
-            num_workers=args.num_workers,
-            collate_fn=rfid_collate_fn,
-            pin_memory=True
+        val_dataset = FocusDatasetwithRFID(
+            base_dir=args.data_dir,
+            split='val',
+            use_multi_angle=args.use_multi_angle,
+            use_noisy=args.use_noisy,
+            split_strategy=args.split_strategy,
+            train_angles=args.train_angles,
+            val_angle=args.val_angle,
+            samples_per_class=args.samples_per_class
         )
         
-        # Get the number of action classes and object classes from the dataset
-        action_num = len(train_dataset.action_types)
-        obj_num = 6  # Fixed at 6 for the RFID dataset
+    elif args.dataset_type == 'real':
+        # Real-world data only
+        logger.info(f"Using real-world data with {args.real_split_strategy} splitting strategy")
         
-        # Create model with current configuration
-        model = HOINet(
-            action_num=action_num,
-            obj_num=obj_num,
-            dropout_rate=args.dropout_rate,
-            num_antennas=args.num_antennas,
-            data_format='processed'
+        train_dataset = FocusRealDatasetwithRFID(
+            base_dir=args.real_data_dir,
+            split='train',
+            use_multi_angle=args.use_multi_angle,
+            random_subset_n=args.real_samples_per_class,
+            val_angle=args.real_val_angle
         )
-        model = model.to(device)
         
-        # Create optimizer
-        optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-3)
+        val_dataset = FocusRealDatasetwithRFID(
+            base_dir=args.real_data_dir,
+            split='val',
+            use_multi_angle=args.use_multi_angle,
+            random_subset_n=args.real_samples_per_class,
+            val_angle=args.real_val_angle
+        )
         
-        # Training loop for search epochs
-        val_metrics_history = []
+    elif args.dataset_type == 'mixed':
+        # Combining real and simulated data for fine-tuning
+        logger.info("Using mixed dataset (real + simulated)")
         
-        for epoch in range(search_epochs):
-            # Train one epoch
-            model.train()
-            epoch_loss = 0
-            epoch_samples = 0
-            
-            with tqdm(total=len(train_dataloader), desc=f"Search [{i+1}/{len(combos)}] Epoch {epoch+1}/{search_epochs}") as pbar:
-                for batch_idx, batch in enumerate(train_dataloader):
-                    # Move data to device based on data type selected
-                    if args.use_noisy:
-                        mm_data = [
-                            batch['noisy_radar_data'][0].to(device),  # RDspecs
-                            batch['noisy_radar_data'][1].to(device),  # AoAspecs
-                            batch['noisy_radar_data'][2].to(device)   # specs_mask
-                        ]
-                        rfid_data = [
-                            batch['noisy_rfid_data'][0].to(device),   # obj_loc
-                            batch['noisy_rfid_data'][1].to(device)    # obj_mask
-                        ]
-                    else:
-                        mm_data = [
-                            batch['radar_data'][0].to(device),  # RDspecs
-                            batch['radar_data'][1].to(device),  # AoAspecs
-                            batch['radar_data'][2].to(device)   # specs_mask
-                        ]
-                        rfid_data = [
-                            batch['rfid_data'][0].to(device),   # obj_loc
-                            batch['rfid_data'][1].to(device)    # obj_mask
-                        ]
-                    
-                    action_labels = batch['action_labels'].to(device)
-                    obj_labels = batch['obj_labels'].to(device)
-                    
-                    # Forward pass with mixed precision if available
-                    if args.use_bf16 and torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8:
-                        with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
-                            action_output, obj_output = model(mm_data, rfid_data)
-                            batch_loss = loss_fn(action_output, action_labels, obj_output, obj_labels, loss_coef)
-                    else:
-                        action_output, obj_output = model(mm_data, rfid_data)
-                        batch_loss = loss_fn(action_output, action_labels, obj_output, obj_labels, loss_coef)
-                    
-                    # Backward pass and optimization
-                    optimizer.zero_grad()
-                    batch_loss.backward()
-                    optimizer.step()
-                    
-                    # Update metrics
-                    epoch_loss += batch_loss.item() * action_labels.size(0)
-                    epoch_samples += action_labels.size(0)
-                    
-                    pbar.update(1)
-                    pbar.set_postfix({'loss': batch_loss.item()})
-            
-            # Evaluate on validation set
-            val_loss, val_metrics = evaluate(model, val_dataloader, device, args, loss_coef)
-            val_action_acc = val_metrics['Action Accuracy']
-            val_obj_acc = val_metrics['Object Accuracy']
-            val_avg_acc = (val_action_acc + val_obj_acc) / 2  # Combined metric
-            
-            val_metrics_history.append(val_avg_acc)
-            
-            logger.info(f"Search [{i+1}/{len(combos)}] Epoch {epoch+1}/{search_epochs} - "
-                       f"Train Loss: {epoch_loss/epoch_samples:.4f}, "
-                       f"Val Action Acc: {val_action_acc:.4f}, "
-                       f"Val Object Acc: {val_obj_acc:.4f}, "
-                       f"Val Avg Acc: {val_avg_acc:.4f}")
+        # Get simulated dataset
+        sim_train_dataset = FocusDatasetwithRFID(
+            base_dir=args.data_dir,
+            split='train',
+            use_multi_angle=args.use_multi_angle,
+            use_noisy=args.use_noisy,
+            split_strategy=args.split_strategy,
+            train_angles=args.train_angles,
+            val_angle=args.val_angle,
+            samples_per_class=args.samples_per_class
+        )
         
-        # Calculate final validation metric for this configuration (average of last 2 epochs if available)
-        if len(val_metrics_history) > 1:
-            final_val_metric = sum(val_metrics_history[-2:]) / 2
+        # Get real dataset
+        real_train_dataset = FocusRealDatasetwithRFID(
+            base_dir=args.real_data_dir,
+            split='train',
+            use_multi_angle=args.use_multi_angle,
+            random_subset_n=args.real_samples_per_class,
+            val_angle=args.real_val_angle
+        )
+        
+        # For validation, we use real data to match the deployment scenario
+        val_dataset = FocusRealDatasetwithRFID(
+            base_dir=args.real_data_dir,
+            split='val',
+            use_multi_angle=args.use_multi_angle,
+            random_subset_n=args.real_samples_per_class,
+            val_angle=args.real_val_angle
+        )
+        
+        # Combine datasets
+        train_dataset = (sim_train_dataset, real_train_dataset)
+    
+    else:
+        raise ValueError(f"Unknown dataset type: {args.dataset_type}")
+    
+    logger.info(f"Train dataset size: {len(train_dataset) if not isinstance(train_dataset, tuple) else f'{len(train_dataset[0])} sim + {len(train_dataset[1])} real'}")
+    logger.info(f"Val dataset size: {len(val_dataset)}")
+    
+    return train_dataset, val_dataset
+
+def load_pretrained_model(model, pretrained_path, freeze_encoder=False):
+    """
+    Load a pretrained model for fine-tuning.
+    
+    Args:
+        model: Model to load pretrained weights into
+        pretrained_path: Path to the pretrained model file
+        freeze_encoder: Whether to freeze encoder layers
+        
+    Returns:
+        model: Model with pretrained weights
+    """
+    logger.info(f"Loading pretrained model from {pretrained_path}")
+    
+    if not os.path.exists(pretrained_path):
+        logger.warning(f"Pretrained model not found at {pretrained_path}")
+        return model
+    
+    # Load checkpoint
+    checkpoint = torch.load(pretrained_path, map_location='cpu')
+    
+    # Handle checkpoint format variations
+    if 'state_dict' in checkpoint:
+        state_dict = checkpoint['state_dict']
+    else:
+        state_dict = checkpoint
+    
+    # Load state dict into model
+    model.load_state_dict(state_dict, strict=False)
+    logger.info("Pretrained model loaded successfully")
+    
+    # Freeze encoder layers if specified
+    if freeze_encoder:
+        logger.info("Freezing encoder layers")
+        for name, param in model.named_parameters():
+            if 'encoder' in name or 'feature_extractor' in name:
+                param.requires_grad = False
+                logger.debug(f"Froze parameter: {name}")
+    
+    return model
+
+class MixedDataLoader:
+    """Custom dataloader to interleave batches from simulated and real datasets"""
+    def __init__(self, sim_dataset, real_dataset, batch_size, shuffle=True, num_workers=1, collate_fn=None, drop_last=False):
+        self.sim_loader = DataLoader(
+            sim_dataset, 
+            batch_size=batch_size, 
+            shuffle=shuffle,
+            num_workers=num_workers,
+            collate_fn=collate_fn,
+            pin_memory=True,
+            drop_last=drop_last
+        )
+        
+        self.real_loader = DataLoader(
+            real_dataset, 
+            batch_size=batch_size, 
+            shuffle=shuffle,
+            num_workers=num_workers,
+            collate_fn=collate_fn,
+            pin_memory=True,
+            drop_last=drop_last
+        )
+        
+        # Calculate length - use the longer dataloader
+        self.length = max(len(self.sim_loader), len(self.real_loader))
+        
+        # Create iterators
+        self.sim_iter = iter(self.sim_loader)
+        self.real_iter = iter(self.real_loader)
+        
+        # Adaptive mixing weights
+        self.sim_weight = 0.5  # Start with equal weighting
+        
+    def __iter__(self):
+        # Reset iterators at the start of each epoch
+        self.sim_iter = iter(self.sim_loader)
+        self.real_iter = iter(self.real_loader)
+        return self
+    
+    def __next__(self):
+        # Weighted random selection of dataset
+        if np.random.random() < self.sim_weight:
+            try:
+                return next(self.sim_iter), 'sim'
+            except StopIteration:
+                # If sim is exhausted, reset it and return real
+                self.sim_iter = iter(self.sim_loader)
+                return next(self.real_iter), 'real'
         else:
-            final_val_metric = val_metrics_history[-1]
-            
-        # Store result
-        results.append({
-            'lr': lr,
-            'batch_size': bs,
-            'loss_coef': loss_coef,
-            'val_metric': final_val_metric
-        })
-        
-        # Update best configuration if needed
-        if final_val_metric > best_val_metric:
-            best_val_metric = final_val_metric
-            best_lr = lr
-            best_batch_size = bs
-            best_loss_coef = loss_coef
-            
-        # Clear memory
-        del model, optimizer
-        torch.cuda.empty_cache()
+            try:
+                return next(self.real_iter), 'real'
+            except StopIteration:
+                # If real is exhausted, reset it and return sim
+                self.real_iter = iter(self.real_loader)
+                return next(self.sim_iter), 'sim'
     
-    # Print and save results
-    logger.info("\nHyperparameter Search Results:")
-    results_file = os.path.join(search_dir, 'search_results.txt')
-    with open(results_file, 'w') as f:
-        f.write(f"Dataset type: processed with RFID, Data type: {data_type}\n\n")
-        for result in sorted(results, key=lambda x: x['val_metric'], reverse=True):
-            result_str = f"LR: {result['lr']}, BS: {result['batch_size']}, LOSS_COEF: {result['loss_coef']}, Val Metric: {result['val_metric']:.4f}"
-            logger.info(result_str)
-            f.write(result_str + '\n')
+    def __len__(self):
+        return self.length
     
-    logger.info(f"\nBest Configuration: LR={best_lr}, BS={best_batch_size}, LOSS_COEF={best_loss_coef}, Val Metric={best_val_metric:.4f}")
-    
-    # Plot results
-    plt.figure(figsize=(15, 5))
-    
-    # Plot for different batch sizes
-    plt.subplot(1, 2, 1)
-    for bs in batch_sizes:
-        for lc in loss_coefs:
-            bs_lc_results = [r for r in results if r['batch_size'] == bs and r['loss_coef'] == lc]
-            bs_lc_results = sorted(bs_lc_results, key=lambda x: x['lr'])
-            if bs_lc_results:  # Only plot if there are results for this combination
-                plt.plot([r['lr'] for r in bs_lc_results], 
-                         [r['val_metric'] for r in bs_lc_results], 
-                         marker='o', 
-                         label=f'BS={bs}, LC={lc}')
-    
-    plt.xscale('log')
-    plt.xlabel('Learning Rate')
-    plt.ylabel('Validation Metric (Avg Accuracy)')
-    plt.title('Search Results by Learning Rate')
-    plt.legend()
-    plt.grid(True)
-    
-    # Plot for different loss coefficients
-    plt.subplot(1, 2, 2)
-    for bs in batch_sizes:
-        for lr in learning_rates:
-            bs_lr_results = [r for r in results if r['batch_size'] == bs and r['lr'] == lr]
-            bs_lr_results = sorted(bs_lr_results, key=lambda x: x['loss_coef'])
-            if bs_lr_results:  # Only plot if there are results
-                plt.plot([r['loss_coef'] for r in bs_lr_results], 
-                         [r['val_metric'] for r in bs_lr_results], 
-                         marker='o', 
-                         label=f'BS={bs}, LR={lr}')
-    
-    plt.xlabel('Loss Coefficient')
-    plt.ylabel('Validation Metric (Avg Accuracy)')
-    plt.title('Search Results by Loss Coefficient')
-    plt.legend()
-    plt.grid(True)
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(search_dir, 'search_results.png'))
-    
-    return best_lr, best_batch_size, best_loss_coef
+    def update_weights(self, sim_loss, real_loss):
+        """Adaptively update mixing weights based on relative loss magnitudes"""
+        total = sim_loss + real_loss
+        if total > 0:
+            self.sim_weight = real_loss / total  # More weight to dataset with higher loss
     
 def train_and_evaluate(model, train_dataset, val_dataset, optimizer, scheduler, args, loss_coef):
     """Train the model and evaluate on validation set"""
@@ -752,214 +722,6 @@ def evaluate(model, dataloader, device, args, loss_coef):
     avg_loss = total_loss / total_samples
     
     return avg_loss, metrics
-
-def get_datasets(args):
-    """
-    Create datasets based on the specified type and splitting strategy
-    
-    Args:
-        args: Command line arguments containing dataset configuration
-        
-    Returns:
-        train_dataset: Training dataset
-        val_dataset: Validation dataset
-    """
-    if args.dataset_type == 'sim':
-        # Simulated data only
-        logger.info(f"Using simulated data with {args.split_strategy} splitting strategy")
-        
-        train_dataset = FocusDatasetwithRFID(
-            base_dir=args.data_dir,
-            split='train',
-            use_multi_angle=args.use_multi_angle,
-            use_noisy=args.use_noisy,
-            split_strategy=args.split_strategy,
-            train_angles=args.train_angles,
-            val_angle=args.val_angle,
-            samples_per_class=args.samples_per_class
-        )
-        
-        val_dataset = FocusDatasetwithRFID(
-            base_dir=args.data_dir,
-            split='val',
-            use_multi_angle=args.use_multi_angle,
-            use_noisy=args.use_noisy,
-            split_strategy=args.split_strategy,
-            train_angles=args.train_angles,
-            val_angle=args.val_angle,
-            samples_per_class=args.samples_per_class
-        )
-        
-    elif args.dataset_type == 'real':
-        # Real-world data only
-        logger.info(f"Using real-world data with {args.real_split_strategy} splitting strategy")
-        
-        train_dataset = FocusRealDatasetwithRFID(
-            base_dir=args.real_data_dir,
-            split='train',
-            use_multi_angle=args.use_multi_angle,
-            random_subset_n=args.real_samples_per_class,
-            val_angle=args.real_val_angle
-        )
-        
-        val_dataset = FocusRealDatasetwithRFID(
-            base_dir=args.real_data_dir,
-            split='val',
-            use_multi_angle=args.use_multi_angle,
-            random_subset_n=args.real_samples_per_class,
-            val_angle=args.real_val_angle
-        )
-        
-    elif args.dataset_type == 'mixed':
-        # Combining real and simulated data for fine-tuning
-        logger.info("Using mixed dataset (real + simulated)")
-        
-        # Get simulated dataset
-        sim_train_dataset = FocusDatasetwithRFID(
-            base_dir=args.data_dir,
-            split='train',
-            use_multi_angle=args.use_multi_angle,
-            use_noisy=args.use_noisy,
-            split_strategy=args.split_strategy,
-            train_angles=args.train_angles,
-            val_angle=args.val_angle,
-            samples_per_class=args.samples_per_class
-        )
-        
-        # Get real dataset
-        real_train_dataset = FocusRealDatasetwithRFID(
-            base_dir=args.real_data_dir,
-            split='train',
-            use_multi_angle=args.use_multi_angle,
-            random_subset_n=args.real_samples_per_class,
-            val_angle=args.real_val_angle
-        )
-        
-        # For validation, we use real data to match the deployment scenario
-        val_dataset = FocusRealDatasetwithRFID(
-            base_dir=args.real_data_dir,
-            split='val',
-            use_multi_angle=args.use_multi_angle,
-            random_subset_n=args.real_samples_per_class,
-            val_angle=args.real_val_angle
-        )
-        
-        # Combine datasets
-        train_dataset = (sim_train_dataset, real_train_dataset)
-    
-    else:
-        raise ValueError(f"Unknown dataset type: {args.dataset_type}")
-    
-    logger.info(f"Train dataset size: {len(train_dataset) if not isinstance(train_dataset, tuple) else f'{len(train_dataset[0])} sim + {len(train_dataset[1])} real'}")
-    logger.info(f"Val dataset size: {len(val_dataset)}")
-    
-    return train_dataset, val_dataset
-
-def load_pretrained_model(model, pretrained_path, freeze_encoder=False):
-    """
-    Load a pretrained model for fine-tuning.
-    
-    Args:
-        model: Model to load pretrained weights into
-        pretrained_path: Path to the pretrained model file
-        freeze_encoder: Whether to freeze encoder layers
-        
-    Returns:
-        model: Model with pretrained weights
-    """
-    logger.info(f"Loading pretrained model from {pretrained_path}")
-    
-    if not os.path.exists(pretrained_path):
-        logger.warning(f"Pretrained model not found at {pretrained_path}")
-        return model
-    
-    # Load checkpoint
-    checkpoint = torch.load(pretrained_path, map_location='cpu')
-    
-    # Handle checkpoint format variations
-    if 'state_dict' in checkpoint:
-        state_dict = checkpoint['state_dict']
-    else:
-        state_dict = checkpoint
-    
-    # Load state dict into model
-    model.load_state_dict(state_dict, strict=False)
-    logger.info("Pretrained model loaded successfully")
-    
-    # Freeze encoder layers if specified
-    if freeze_encoder:
-        logger.info("Freezing encoder layers")
-        for name, param in model.named_parameters():
-            if 'encoder' in name or 'feature_extractor' in name:
-                param.requires_grad = False
-                logger.debug(f"Froze parameter: {name}")
-    
-    return model
-
-class MixedDataLoader:
-    """Custom dataloader to interleave batches from simulated and real datasets"""
-    def __init__(self, sim_dataset, real_dataset, batch_size, shuffle=True, num_workers=1, collate_fn=None, drop_last=False):
-        self.sim_loader = DataLoader(
-            sim_dataset, 
-            batch_size=batch_size, 
-            shuffle=shuffle,
-            num_workers=num_workers,
-            collate_fn=collate_fn,
-            pin_memory=True,
-            drop_last=drop_last
-        )
-        
-        self.real_loader = DataLoader(
-            real_dataset, 
-            batch_size=batch_size, 
-            shuffle=shuffle,
-            num_workers=num_workers,
-            collate_fn=collate_fn,
-            pin_memory=True,
-            drop_last=drop_last
-        )
-        
-        # Calculate length - use the longer dataloader
-        self.length = max(len(self.sim_loader), len(self.real_loader))
-        
-        # Create iterators
-        self.sim_iter = iter(self.sim_loader)
-        self.real_iter = iter(self.real_loader)
-        
-        # Adaptive mixing weights
-        self.sim_weight = 0.5  # Start with equal weighting
-        
-    def __iter__(self):
-        # Reset iterators at the start of each epoch
-        self.sim_iter = iter(self.sim_loader)
-        self.real_iter = iter(self.real_loader)
-        return self
-    
-    def __next__(self):
-        # Weighted random selection of dataset
-        if np.random.random() < self.sim_weight:
-            try:
-                return next(self.sim_iter), 'sim'
-            except StopIteration:
-                # If sim is exhausted, reset it and return real
-                self.sim_iter = iter(self.sim_loader)
-                return next(self.real_iter), 'real'
-        else:
-            try:
-                return next(self.real_iter), 'real'
-            except StopIteration:
-                # If real is exhausted, reset it and return sim
-                self.real_iter = iter(self.real_loader)
-                return next(self.sim_iter), 'sim'
-    
-    def __len__(self):
-        return self.length
-    
-    def update_weights(self, sim_loss, real_loss):
-        """Adaptively update mixing weights based on relative loss magnitudes"""
-        total = sim_loss + real_loss
-        if total > 0:
-            self.sim_weight = real_loss / total  # More weight to dataset with higher loss
 
 def main():
     # Parse command line arguments

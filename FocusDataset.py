@@ -4,6 +4,7 @@ import os
 from torch.utils.data.dataset import Dataset
 import numpy as np
 from torch.nn.utils.rnn import pad_sequence
+from typing import Optional
 
 log = logging.getLogger(__name__)
 
@@ -1170,7 +1171,7 @@ class FocusRealDatasetwithRFID(Dataset):
         split: str = 'train',
         use_multi_angle: bool = True,
         random_subset_n: int = 37,
-        val_angle: str | None = None,
+        val_angle: Optional[str] = None,
     ):
         super().__init__()
         self.base_dir = base_dir
