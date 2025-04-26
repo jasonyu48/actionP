@@ -51,15 +51,15 @@ def parse_args():
                         help='Use noisy data for training instead of simulated data')
     
     # Dataset selection and splitting strategy
-    parser.add_argument('--dataset_type', type=str, choices=['sim', 'real', 'mixed'], default='real',
+    parser.add_argument('--dataset_type', type=str, choices=['sim', 'real', 'mixed'], default='mixed',
                         help='Type of dataset to use: simulated, real-world, or mixed')
-    parser.add_argument('--split_strategy', type=str, choices=['default', 'angle-based', 'random-subset'], default='default',
+    parser.add_argument('--split_strategy', type=str, choices=['default', 'angle-based', 'random-subset'], default='random-subset',
                         help='Strategy for splitting data (default: 70/15/15 random split)')
     parser.add_argument('--train_angles', type=str, nargs='+', default=None,
                         help='Angles to use for training with angle-based splitting (e.g., 0 90)')
     parser.add_argument('--val_angle', type=str, default=None,
                         help='Angle to use for validation with angle-based splitting (e.g., 180)')
-    parser.add_argument('--samples_per_class', type=int, default=None,
+    parser.add_argument('--samples_per_class', type=int, default=150,
                         help='Maximum samples per class for angle-based or random-subset splitting')
     parser.add_argument('--real_split_strategy', type=str, choices=['default', 'angle-based', 'random-subset'], default='random-subset',
                         help='Strategy for splitting real data')
@@ -72,13 +72,13 @@ def parse_args():
     parser.add_argument('--pretrained_path', type=str, 
                         default="/scratch/tshu2/jyu197/XRF55-repo/hoi_model_checkpoints_loss_coef_0.3_neuron_num_64/best.pth.tar",
                         help='Path to pretrained model for transfer learning')
-    parser.add_argument('--finetune', action='store_true', default=False,
+    parser.add_argument('--finetune', action='store_true', default=True,
                         help='Use pretrained model and finetune on real/mixed data')
     parser.add_argument('--freeze_encoder', action='store_true', default=False,
                         help='Freeze encoder layers during finetuning (only train the classifier head)')
     
     # Training parameters
-    parser.add_argument('--learning_rate', type=float, default=1e-4, 
+    parser.add_argument('--learning_rate', type=float, default=1e-5, 
                         help='Learning rate for optimizer')
     parser.add_argument('--batch_size', type=int, default=32, 
                         help='Batch size for training and validation')
@@ -88,7 +88,7 @@ def parse_args():
                         help='Number of workers for data loading')
     
     # Hardware and execution parameters
-    parser.add_argument('--checkpoint_dir', type=str, default='./hoi_model_from_scratch', 
+    parser.add_argument('--checkpoint_dir', type=str, default='./hoi_model_mixed_finetune', 
                         help='Directory to save checkpoints')
     parser.add_argument('--use_bf16', action='store_true', default=True, 
                         help='Use bfloat16 precision if available')
@@ -273,7 +273,7 @@ def load_pretrained_model(model, pretrained_path, freeze_encoder=False):
         return model
     
     # Load checkpoint
-    checkpoint = torch.load(pretrained_path, map_location='cpu')
+    checkpoint = torch.load(pretrained_path, map_location='cpu', weights_only=False)
     
     # Handle checkpoint format variations
     if 'state_dict' in checkpoint:
