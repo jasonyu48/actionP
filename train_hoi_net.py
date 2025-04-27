@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import itertools
 
 # Import custom modules
-from model.transformer_model_with_rfid import HOINet, loss_fn, classifer_metrics, getModelSize
+from model.transformer_model_with_rfid_no_focus import HOINet, loss_fn, classifer_metrics, getModelSize
 from FocusDataset import FocusDatasetwithRFID, rfid_collate_fn, FocusRealDatasetwithRFID
 import model_utils
 
@@ -27,11 +27,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description='HOI Recognition Training with Radar and RFID Data')
     
     # Model parameters
-    parser.add_argument('--encoder_dim', type=int, default=256, 
+    parser.add_argument('--encoder_dim', type=int, default=512, 
                         help='Dimension of encoder models')
-    parser.add_argument('--fusion_dim', type=int, default=512, 
+    parser.add_argument('--fusion_dim', type=int, default=1024, 
                         help='Dimension for fusion transformer')
-    parser.add_argument('--neuron_num', type=int, default=64, 
+    parser.add_argument('--neuron_num', type=int, default=128, 
                         help='Dimension for object branch')
     parser.add_argument('--num_antennas', type=int, default=12, 
                         help='Number of antennas in radar data')
@@ -41,9 +41,9 @@ def parse_args():
                         help='Weight of the object classification loss')
     
     # Dataset parameters
-    parser.add_argument('--data_dir', type=str, default='/scratch/tshu2/jyu197/Focus_processed_multi_angle_rfid', 
+    parser.add_argument('--data_dir', type=str, default='/weka/scratch/rzhao36/lwang/datasets/HOI/datasets/classic', 
                         help='Directory of simulation data with RFID information')
-    parser.add_argument('--real_data_dir', type=str, default='/scratch/tshu2/jyu197/Focus_processed_multi_angle_rfid_real',
+    parser.add_argument('--real_data_dir', type=str, default='/weka/scratch/rzhao36/lwang/datasets/HOI/RealAction/datasets/classic',
                         help='Directory of real-world data with RFID information')
     parser.add_argument('--use_multi_angle', action='store_true', default=True, 
                         help='Use data from all angles (0, 90, 180, 270) instead of just 90 degrees')
@@ -80,7 +80,7 @@ def parse_args():
     # Training parameters
     parser.add_argument('--learning_rate', type=float, default=1e-4, 
                         help='Learning rate for optimizer')
-    parser.add_argument('--batch_size', type=int, default=32, 
+    parser.add_argument('--batch_size', type=int, default=2, 
                         help='Batch size for training and validation')
     parser.add_argument('--num_epochs', type=int, default=60, 
                         help='Number of training epochs')
@@ -88,7 +88,7 @@ def parse_args():
                         help='Number of workers for data loading')
     
     # Hardware and execution parameters
-    parser.add_argument('--checkpoint_dir', type=str, default='./hoi_model_from_scratch', 
+    parser.add_argument('--checkpoint_dir', type=str, default='./hoi_model_from_scratch_classic_data', 
                         help='Directory to save checkpoints')
     parser.add_argument('--use_bf16', action='store_true', default=True, 
                         help='Use bfloat16 precision if available')
@@ -732,10 +732,10 @@ def main():
     
     # Update model constants
     # Note: This requires importing and modifying the transformer_model_with_rfid module
-    from model import transformer_model_with_rfid
-    transformer_model_with_rfid.ENCODER_DIM = args.encoder_dim
-    transformer_model_with_rfid.FUSION_DIM = args.fusion_dim
-    transformer_model_with_rfid.NEURON_NUM = args.neuron_num
+    from model import transformer_model_with_rfid_no_focus
+    transformer_model_with_rfid_no_focus.ENCODER_DIM = args.encoder_dim
+    transformer_model_with_rfid_no_focus.FUSION_DIM = args.fusion_dim
+    transformer_model_with_rfid_no_focus.NEURON_NUM = args.neuron_num
     
     # Log model settings
     logger.info(f"Model settings: ENCODER_DIM={args.encoder_dim}, FUSION_DIM={args.fusion_dim}, NEURON_NUM={args.neuron_num}")
