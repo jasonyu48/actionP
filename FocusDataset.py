@@ -1701,29 +1701,16 @@ class DatasetwithRFID(Dataset):
         # Load radar data - CHANGED FOR CLASSIC FORMAT
         sim_radar_data = np.load(sample['sim_radar_path'])  # Now using specs.npy - shape (time_steps, 3, 256, 256)
         
-        # Extract spectrogram data
-        range_specs = sim_radar_data[:, 0, :, :]  # (time_steps, 256, 256)
-        doppler_specs = sim_radar_data[:, 1, :, :]  # (time_steps, 256, 256)
-        music_specs = sim_radar_data[:, 2, :, :]  # (time_steps, 256, 256)
-        
-        # Convert to PyTorch tensors
-        range_specs_tensor = torch.from_numpy(range_specs).float()
-        doppler_specs_tensor = torch.from_numpy(doppler_specs).float()
-        music_specs_tensor = torch.from_numpy(music_specs).float()
-        
         # Stack spectrograms to make the data shape consistent with the model expectation
-        radar_tensor = torch.stack([range_specs_tensor, doppler_specs_tensor, music_specs_tensor], dim=1)
+        radar_tensor = torch.from_numpy(sim_radar_data).float()
         
         # Load noisy radar data if available and requested
         if self.use_noisy and sample['noisy_radar_path'] is not None:
             noisy_radar_data = np.load(sample['noisy_radar_path'])  # Now using sim2real_specs.npy
-            noisy_RDspecs = torch.from_numpy(noisy_radar_data[:, 0, :, :]).float()
-            noisy_doppler_specs = torch.from_numpy(noisy_radar_data[:, 1, :, :]).float()
-            noisy_music_specs = torch.from_numpy(noisy_radar_data[:, 2, :, :]).float()
-            noisy_specs_combined = torch.stack([noisy_RDspecs, noisy_doppler_specs, noisy_music_specs], dim=1)
+            noisy_specs = torch.from_numpy(noisy_radar_data).float()
         else:
             # Fall back to using simulated data
-            noisy_specs_combined = radar_tensor
+            noisy_specs = radar_tensor
         
         # Load RFID data
         clean_rfid_data = np.load(sample['clean_rfid_path'])
@@ -2040,18 +2027,8 @@ class RealDatasetwithRFID(Dataset):
         # Load and process radar data - CHANGED FOR CLASSIC FORMAT
         radar_data = np.load(sample['radar_path'])  # shape (time_steps, 3, 256, 256)
         
-        # Extract spectrogram data
-        range_specs = radar_data[:, 0, :, :]  # (time_steps, 256, 256)
-        doppler_specs = radar_data[:, 1, :, :]  # (time_steps, 256, 256)
-        music_specs = radar_data[:, 2, :, :]  # (time_steps, 256, 256)
-        
-        # Convert to PyTorch tensors
-        range_specs_tensor = torch.from_numpy(range_specs).float()
-        doppler_specs_tensor = torch.from_numpy(doppler_specs).float()
-        music_specs_tensor = torch.from_numpy(music_specs).float()
-        
         # Stack spectrograms to make the data shape consistent with the model expectation
-        radar_tensor = torch.stack([range_specs_tensor, doppler_specs_tensor, music_specs_tensor], dim=1)
+        radar_tensor = torch.from_numpy(radar_data).float()
         
         # For compatibility with the training code, we expose the same data for both clean and noisy
         noisy_radar_tensor = radar_tensor
