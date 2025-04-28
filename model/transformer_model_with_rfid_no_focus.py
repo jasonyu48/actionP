@@ -7,9 +7,9 @@ import math
 import json
 
 # Global constants
-ENCODER_DIM = 512  # Dimension for mmWave branch
-FUSION_DIM = 1024  # Dimension for fusion transformer
-NEURON_NUM = 128   # Dimension for object branch
+ENCODER_DIM = 256  # Dimension for mmWave branch
+FUSION_DIM = 512  # Dimension for fusion transformer
+NEURON_NUM = 64   # Dimension for object branch
 
 class Reshape(torch.nn.Module):
     def __init__(self,type):
@@ -70,11 +70,11 @@ class RadarEncoderTransformer(nn.Module):
     This unified encoder processes a sequence of dimensions (time/velocity)
     with features from antennas and range bins.
     """
-    def __init__(self, d_model=ENCODER_DIM, nhead=4, dropout=0.2, num_antennas=12):
+    def __init__(self, d_model=ENCODER_DIM, nhead=4, dropout=0.2):
         super(RadarEncoderTransformer, self).__init__()
         
-        # Reshape inputs - project from antenna*range dimensions to d_model
-        self.input_projection = nn.Linear(256*num_antennas, d_model)
+        # Reshape inputs
+        self.input_projection = nn.Linear(256, d_model)
         
         # Positional encoding for sequence dimension
         self.pos_encoder = PositionalEncoding(d_model, dropout)
@@ -91,33 +91,28 @@ class RadarEncoderTransformer(nn.Module):
         
         # Global pooling over sequence - using mean pooling followed by projection
         self.global_pooling = nn.Sequential(
-            nn.Linear(d_model, 512),
-            nn.LayerNorm(512),
+            nn.Linear(d_model, 256),
+            nn.LayerNorm(256),
             nn.LeakyReLU(),
         )
         
     def forward(self, x):
-        # x shape: (-1, num_antennas, 128, 256)
-        batch_size = x.size(0)
-        
-        # Reshape to (-1, 128, num_antennas*256)
-        x = x.permute(0, 2, 1, 3)  # -> (-1, 128, num_antennas, 256)
-        x = x.reshape(batch_size, 128, -1)  # -> (-1, 128, num_antennas*256)
+        # x shape: (-1, 256, 256)
         
         # Project to d_model dimensions
-        x = self.input_projection(x)  # -> (-1, 128, d_model)
+        x = self.input_projection(x)  # -> (-1, 256, d_model)
         
         # Add positional encoding
-        x = self.pos_encoder(x)  # -> (-1, 128, d_model)
+        x = self.pos_encoder(x)  # -> (-1, 256, d_model)
         
         # Apply transformer encoder
-        x = self.transformer_encoder(x)  # -> (-1, 128, d_model)
+        x = self.transformer_encoder(x)  # -> (-1, 256, d_model)
         
         # Apply mean pooling over sequence dimension
         x = torch.mean(x, dim=1)  # -> (-1, d_model)
         
         # Apply projection layers
-        x = self.global_pooling(x)  # -> (-1, 512)
+        x = self.global_pooling(x)  # -> (-1, 256)
         
         return x
 
@@ -171,7 +166,7 @@ class MusicEncoderViT(nn.Module):
         # x shape: (-1, 1, 256, 256)
         batch_size = x.size(0)
         
-        # Extract patches and project - from (-1, 1, 256, 256) to (-1, d_model, patches, patches)
+        # Extract patches and project - from (-1, 1, 256, 256) to (-1, d_model, 256/patch_size, 256/patch_size)
         x = self.patch_embedding(x)  # -> (-1, d_model, 256/patch_size, 256/patch_size)
         
         # Reshape to sequence of patches - from (-1, d_model, patches, patches) to (-1, patches*patches, d_model)
@@ -196,10 +191,9 @@ class MusicEncoderViT(nn.Module):
         return x
 
 class mmWaveBranch(nn.Module):
-    def __init__(self, dropout_rate=0.1, num_antennas=12, data_format='processed'):
+    def __init__(self, dropout_rate=0.1, data_format='processed'):
         super(mmWaveBranch, self).__init__()
         self.dropout_ = dropout_rate
-        self.num_antennas = num_antennas
         self.data_format = data_format  # 'processed' or 'original'
         
         # For processed Focus data, use transformer-based encoders
@@ -207,7 +201,6 @@ class mmWaveBranch(nn.Module):
             d_model=ENCODER_DIM,
             nhead=4,
             dropout=self.dropout_,
-            num_antennas=self.num_antennas
         )
         
         self.music_encoder = MusicEncoderViT(
@@ -221,13 +214,12 @@ class mmWaveBranch(nn.Module):
             d_model=ENCODER_DIM,
             nhead=4,
             dropout=self.dropout_,
-            num_antennas=self.num_antennas
         )
         
         # Output sizes of our encoders
-        range_out_size = 512
+        range_out_size = 256
         music_out_size = 256
-        doppler_out_size = 512
+        doppler_out_size = 256
         
         total_fusion_size = range_out_size + music_out_size + doppler_out_size
         
@@ -258,30 +250,26 @@ class mmWaveBranch(nn.Module):
         mean_output = sum_output / lengths  
         return mean_output
     
-    def forward(self, RDspecs, AoAspecs, specs_mask):
+    def forward(self, range_specs, doppler_specs, music_specs, specs_mask):
         """
         Process data in the processed Focus format:
-        
-        RDspecs: (batch_size, time_steps, 2, num_antennas, 256, 256) 
-                where 256 = 31 (range data) + 1 (normalized position)
-        AoAspecs: (batch_size, time_steps, 256, 256)
+        range_specs: (batch_size, time_steps, 256, 256)
+        doppler_specs: (batch_size, time_steps, 256, 256)
+        music_specs: (batch_size, time_steps, 256, 256)
         specs_mask: (batch_size, time_steps) padding mask
         """
-        batch_size, time_steps = RDspecs.shape[0], RDspecs.shape[1]
+        batch_size, time_steps = range_specs.shape[0], range_specs.shape[1]
         
-        # Process range data (dim=0)
-        range_data = RDspecs[:, :, 0]  # (batch_size, time_steps, num_antennas, 128, 256)
-        range_data = range_data.view(-1, self.num_antennas, 128, 256)
-        range_embed = self.range_encoder(range_data)
+        # Process range data
+        range_data = range_specs.view(batch_size*time_steps, 256, 256)
+        range_embed = self.range_encoder(range_data) #(batch_size*time_steps, 256)
         
-        # Process AoA data for music encoder
-        aoa_data = AoAspecs.view(-1, 1, 256, 256)  # (batch_size*time_steps, 1, 256, 256)
-        music_embed = self.music_encoder(aoa_data)
-        
-        # Process doppler data (dim=1)
-        doppler_data = RDspecs[:, :, 1]  # (batch_size, time_steps, num_antennas, 128, 256)
-        doppler_data = doppler_data.view(-1, self.num_antennas, 128, 256)
-        doppler_embed = self.doppler_encoder(doppler_data)
+        doppler_data = doppler_specs.view(batch_size*time_steps, 256, 256)
+        doppler_embed = self.doppler_encoder(doppler_data) #(batch_size*time_steps, 256)
+
+        aoa_data = music_specs.view(batch_size*time_steps, 256, 256)
+        aoa_data = aoa_data.unsqueeze(1)  # Add channel dimension (batch_size*time_steps, 1, 256, 256)
+        music_embed = self.music_encoder(aoa_data) #(batch_size*time_steps, 256)
         
         # Concatenate all embeddings
         fused_embed = torch.cat((range_embed, music_embed, doppler_embed), dim=-1)
@@ -359,7 +347,7 @@ class OBJBranch(nn.Module):
         
 
 class HOINet(nn.Module):
-    def __init__(self, action_num=64, obj_num=6, dropout_rate=0.1, num_antennas=12, data_format='processed'):
+    def __init__(self, action_num=64, obj_num=6, dropout_rate=0.1, data_format='processed'):
         super(HOINet, self).__init__()
         self.dropout_ = dropout_rate
         self.action_num = action_num
@@ -367,7 +355,6 @@ class HOINet(nn.Module):
         
         self.mmWaveBranch = mmWaveBranch(
             dropout_rate=dropout_rate,
-            num_antennas=num_antennas,
             data_format=data_format
         )
         
@@ -404,25 +391,28 @@ class HOINet(nn.Module):
             elif isinstance(m, torch.nn.Linear):
                 torch.nn.init.kaiming_normal_(m.weight.data)
         
-    def forward(self, mm_data_list, rfid_data_list):
+    def forward(self, mmWave_data_list, rfid_data_list):
         """
-        mm_data_list: [RDspecs, AoAspecs, specs_mask]
-          - RDspecs: (batch_size, time_steps, 2, num_antennas, 256, 256)
-          - AoAspecs: (batch_size, time_steps, 256, 256)
-          - specs_mask: (batch_size, time_steps) padding mask
+        mmWave_data_list: [mmWave_data, specs_mask]
+        mmWave_data: tensor of shape (batch_size, time_steps, 3, 256, 256)
+        specs_mask: tensor of shape (batch_size, time_steps) padding mask
         
         rfid_data_list: [obj_loc, obj_mask, ...]
           - obj_loc: (batch_size, time_steps, obj_num, 12)
           - obj_mask: (batch_size, time_steps) padding mask
         """
         # Unpack mmWave data
-        RDspecs, AoAspecs, specs_mask = mm_data_list
+        mmWave_data = mmWave_data_list[0]
+        range_specs = mmWave_data[:,:,0]  # (batch_size, time_steps, 256, 256)
+        doppler_specs = mmWave_data[:,:,1]  # (batch_size, time_steps, 256, 256)
+        music_specs = mmWave_data[:,:,2]  # (batch_size, time_steps, 256, 256)
+        specs_mask = mmWave_data_list[1]
         
         # Process through branches
-        mmWave_output = self.mmWaveBranch(RDspecs, AoAspecs, specs_mask)  # (m,n,1024) -> (m,768)
+        mmWave_output = self.mmWaveBranch(range_specs, doppler_specs, music_specs, specs_mask) #(batch_size, FUSION_DIM)
         obj_output = self.OBJBranch(rfid_data_list)  # (m,n,6,12) -> (m,NEURON_NUM)
         
-        fuse_output = torch.cat((mmWave_output, obj_output), dim=-1)  # (m,768) + (m,NEURON_NUM) -> (m,768+NEURON_NUM)
+        fuse_output = torch.cat((mmWave_output, obj_output), dim=-1)
 
         action_output = self.action_classifier(fuse_output)
         objid_output = self.obj_classifier(fuse_output)
@@ -481,16 +471,18 @@ def getModelSize(model):
 def getDebugData():
     batch_size = 4
     time_steps = 7
-    num_antennas = 12
     
-    # Create RDspecs: (batch_size, time_steps, 2, num_antennas, 128, 256)
-    RDspecs = torch.randn(batch_size, time_steps, 2, num_antennas, 128, 256)
+    # Create separate tensors for each spectrogram type with correct shapes
+    range_specs = torch.randn(batch_size, time_steps, 256, 256)
+    doppler_specs = torch.randn(batch_size, time_steps, 256, 256)
+    music_specs = torch.randn(batch_size, time_steps, 256, 256)
     
-    # Create AoAspecs: (batch_size, time_steps, 256, 256)
-    AoAspecs = torch.randn(batch_size, time_steps, 256, 256)
+    # Combine into a tensor of shape (batch_size, time_steps, 3, 256, 256)
+    mmwave_data = torch.stack([range_specs, doppler_specs, music_specs], dim=2)
     
     # Create specs_mask: (batch_size, time_steps)
     specs_mask = torch.zeros((batch_size, time_steps), dtype=torch.bool)
+    
     # Add some padding in the first two samples
     specs_mask[0, 5:] = True
     specs_mask[1, 6:] = True
@@ -500,7 +492,9 @@ def getDebugData():
     obj_mask = specs_mask.clone()  # Use the same mask for simplicity
     
     # Return the data in the expected format
-    return [RDspecs, AoAspecs, specs_mask], [obj_loc, obj_mask]
+    mmwave_data_list = [mmwave_data, specs_mask]
+    rfid_data_list = [obj_loc, obj_mask]
+    return mmwave_data_list, rfid_data_list
 
 
 if __name__ == '__main__':
@@ -510,7 +504,6 @@ if __name__ == '__main__':
             action_num=64,
             obj_num=6,
             dropout_rate=0.2,
-            num_antennas=12,
             data_format='processed'
         )
         
@@ -521,21 +514,21 @@ if __name__ == '__main__':
         getModelSize(model)
         
         print("\nGenerating test data...")
-        mm_data_list, rfid_data_list = getDebugData()
+        mm_data, rfid_data_list = getDebugData()
         
         # Print shapes of input data
-        RDspecs, AoAspecs, specs_mask = mm_data_list
+        range_specs, doppler_specs, music_specs = mm_data[0][:,:,0], mm_data[0][:,:,1], mm_data[0][:,:,2]
         obj_loc, obj_mask = rfid_data_list
         
         print("\nInput shapes:")
-        print(f"- RDspecs: {RDspecs.shape}")
-        print(f"- AoAspecs: {AoAspecs.shape}")
-        print(f"- specs_mask: {specs_mask.shape}")
+        print(f"- range_specs: {range_specs.shape}")
+        print(f"- doppler_specs: {doppler_specs.shape}")
+        print(f"- music_specs: {music_specs.shape}")
         print(f"- obj_loc: {obj_loc.shape}")
         print(f"- obj_mask: {obj_mask.shape}")
         
         print("\nRunning forward pass...")
-        action_output, obj_output = model(mm_data_list, rfid_data_list)
+        action_output, obj_output = model(mm_data, rfid_data_list)
         
         print("\nOutput shapes:")
         print(f"- action_output: {action_output.shape}")

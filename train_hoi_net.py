@@ -14,7 +14,7 @@ import itertools
 
 # Import custom modules
 from model.transformer_model_with_rfid_no_focus import HOINet, loss_fn, classifer_metrics, getModelSize
-from FocusDataset import FocusDatasetwithRFID, rfid_collate_fn, FocusRealDatasetwithRFID
+from FocusDataset import DatasetwithRFID, new_collate_fn, RealDatasetwithRFID
 import model_utils
 
 BEST_ACTION_ACC = 0.0
@@ -27,14 +27,12 @@ def parse_args():
     parser = argparse.ArgumentParser(description='HOI Recognition Training with Radar and RFID Data')
     
     # Model parameters
-    parser.add_argument('--encoder_dim', type=int, default=512, 
+    parser.add_argument('--encoder_dim', type=int, default=256, 
                         help='Dimension of encoder models')
-    parser.add_argument('--fusion_dim', type=int, default=1024, 
+    parser.add_argument('--fusion_dim', type=int, default=512, 
                         help='Dimension for fusion transformer')
-    parser.add_argument('--neuron_num', type=int, default=128, 
+    parser.add_argument('--neuron_num', type=int, default=64, 
                         help='Dimension for object branch')
-    parser.add_argument('--num_antennas', type=int, default=12, 
-                        help='Number of antennas in radar data')
     parser.add_argument('--dropout_rate', type=float, default=0.2, 
                         help='Dropout rate for all models')
     parser.add_argument('--loss_coef', type=float, default=0.3,
@@ -80,7 +78,7 @@ def parse_args():
     # Training parameters
     parser.add_argument('--learning_rate', type=float, default=1e-4, 
                         help='Learning rate for optimizer')
-    parser.add_argument('--batch_size', type=int, default=2, 
+    parser.add_argument('--batch_size', type=int, default=32, 
                         help='Batch size for training and validation')
     parser.add_argument('--num_epochs', type=int, default=60, 
                         help='Number of training epochs')
@@ -167,7 +165,7 @@ def get_datasets(args):
         # Simulated data only
         logger.info(f"Using simulated data with {args.split_strategy} splitting strategy")
         
-        train_dataset = FocusDatasetwithRFID(
+        train_dataset = DatasetwithRFID(
             base_dir=args.data_dir,
             split='train',
             use_multi_angle=args.use_multi_angle,
@@ -178,7 +176,7 @@ def get_datasets(args):
             samples_per_class=args.samples_per_class
         )
         
-        val_dataset = FocusDatasetwithRFID(
+        val_dataset = DatasetwithRFID(
             base_dir=args.data_dir,
             split='val',
             use_multi_angle=args.use_multi_angle,
@@ -193,7 +191,7 @@ def get_datasets(args):
         # Real-world data only
         logger.info(f"Using real-world data with {args.real_split_strategy} splitting strategy")
         
-        train_dataset = FocusRealDatasetwithRFID(
+        train_dataset = RealDatasetwithRFID(
             base_dir=args.real_data_dir,
             split='train',
             use_multi_angle=args.use_multi_angle,
@@ -201,7 +199,7 @@ def get_datasets(args):
             val_angle=args.real_val_angle
         )
         
-        val_dataset = FocusRealDatasetwithRFID(
+        val_dataset = RealDatasetwithRFID(
             base_dir=args.real_data_dir,
             split='val',
             use_multi_angle=args.use_multi_angle,
@@ -214,7 +212,7 @@ def get_datasets(args):
         logger.info("Using mixed dataset (real + simulated)")
         
         # Get simulated dataset
-        sim_train_dataset = FocusDatasetwithRFID(
+        sim_train_dataset = DatasetwithRFID(
             base_dir=args.data_dir,
             split='train',
             use_multi_angle=args.use_multi_angle,
@@ -226,7 +224,7 @@ def get_datasets(args):
         )
         
         # Get real dataset
-        real_train_dataset = FocusRealDatasetwithRFID(
+        real_train_dataset = RealDatasetwithRFID(
             base_dir=args.real_data_dir,
             split='train',
             use_multi_angle=args.use_multi_angle,
@@ -235,7 +233,7 @@ def get_datasets(args):
         )
         
         # For validation, we use real data to match the deployment scenario
-        val_dataset = FocusRealDatasetwithRFID(
+        val_dataset = RealDatasetwithRFID(
             base_dir=args.real_data_dir,
             split='val',
             use_multi_angle=args.use_multi_angle,
@@ -377,7 +375,7 @@ def train_and_evaluate(model, train_dataset, val_dataset, optimizer, scheduler, 
             batch_size=args.batch_size,
             shuffle=True,
             num_workers=args.num_workers,
-            collate_fn=rfid_collate_fn
+            collate_fn=new_collate_fn
         )
         
         val_dataloader = DataLoader(
@@ -385,7 +383,7 @@ def train_and_evaluate(model, train_dataset, val_dataset, optimizer, scheduler, 
             batch_size=args.batch_size,
             shuffle=False,
             num_workers=args.num_workers,
-            collate_fn=rfid_collate_fn,
+            collate_fn=new_collate_fn,
             pin_memory=True
         )
         
@@ -402,7 +400,7 @@ def train_and_evaluate(model, train_dataset, val_dataset, optimizer, scheduler, 
             batch_size=args.batch_size, 
             shuffle=True,
             num_workers=args.num_workers,
-            collate_fn=rfid_collate_fn,
+            collate_fn=new_collate_fn,
             pin_memory=True
         )
         
@@ -411,7 +409,7 @@ def train_and_evaluate(model, train_dataset, val_dataset, optimizer, scheduler, 
             batch_size=args.batch_size,
             shuffle=False,
             num_workers=args.num_workers,
-            collate_fn=rfid_collate_fn,
+            collate_fn=new_collate_fn,
             pin_memory=True
         )
     
@@ -503,25 +501,17 @@ def train_and_evaluate(model, train_dataset, val_dataset, optimizer, scheduler, 
                 
                 # Process data based on batch type (noisy or clean)
                 if args.use_noisy:
-                    mm_data = [
-                        batch['noisy_radar_data'][0].to(device),  # RDspecs
-                        batch['noisy_radar_data'][1].to(device),  # AoAspecs
-                        batch['noisy_radar_data'][2].to(device)   # specs_mask
-                    ]
-                    rfid_data = [
-                        batch['noisy_rfid_data'][0].to(device),   # obj_loc
-                        batch['noisy_rfid_data'][1].to(device)    # obj_mask
-                    ]
+                    mm_data = batch['noisy_radar_data']  # This is now [padded_radar_data, radar_padding_masks]
+                    rfid_data = batch['noisy_rfid_data']  # This is now [padded_rfid_data, rfid_padding_masks]
                 else:
-                    mm_data = [
-                        batch['radar_data'][0].to(device),  # RDspecs
-                        batch['radar_data'][1].to(device),  # AoAspecs
-                        batch['radar_data'][2].to(device)   # specs_mask
-                    ]
-                    rfid_data = [
-                        batch['rfid_data'][0].to(device),   # obj_loc
-                        batch['rfid_data'][1].to(device)    # obj_mask
-                    ]
+                    mm_data = batch['radar_data']  # This is now [padded_radar_data, radar_padding_masks]
+                    rfid_data = batch['rfid_data']  # This is now [padded_rfid_data, rfid_padding_masks]
+                
+                # Move data to device
+                mm_data[0] = mm_data[0].to(device)  # padded_radar_data
+                mm_data[1] = mm_data[1].to(device)  # radar_padding_masks
+                rfid_data[0] = rfid_data[0].to(device)  # padded_rfid_data
+                rfid_data[1] = rfid_data[1].to(device)  # rfid_padding_masks
                 
                 action_labels = batch['action_labels'].to(device)
                 obj_labels = batch['obj_labels'].to(device)
@@ -638,7 +628,6 @@ def train_and_evaluate(model, train_dataset, val_dataset, optimizer, scheduler, 
             'use_noisy': args.use_noisy,
             'use_multi_angle': args.use_multi_angle,
             'dropout_rate': args.dropout_rate,
-            'num_antennas': args.num_antennas,
             'dataset_type': args.dataset_type
         }
         
@@ -667,25 +656,17 @@ def evaluate(model, dataloader, device, args, loss_coef):
             for batch_idx, batch in enumerate(dataloader):
                 # Move data to device based on data type selected
                 if args.use_noisy:
-                    mm_data = [
-                        batch['noisy_radar_data'][0].to(device),  # RDspecs
-                        batch['noisy_radar_data'][1].to(device),  # AoAspecs
-                        batch['noisy_radar_data'][2].to(device)   # specs_mask
-                    ]
-                    rfid_data = [
-                        batch['noisy_rfid_data'][0].to(device),   # obj_loc
-                        batch['noisy_rfid_data'][1].to(device)    # obj_mask
-                    ]
+                    mm_data = batch['noisy_radar_data']  # [padded_radar_data, radar_padding_masks]
+                    rfid_data = batch['noisy_rfid_data']  # [padded_rfid_data, rfid_padding_masks]
                 else:
-                    mm_data = [
-                        batch['radar_data'][0].to(device),  # RDspecs
-                        batch['radar_data'][1].to(device),  # AoAspecs
-                        batch['radar_data'][2].to(device)   # specs_mask
-                    ]
-                    rfid_data = [
-                        batch['rfid_data'][0].to(device),   # obj_loc
-                        batch['rfid_data'][1].to(device)    # obj_mask
-                    ]
+                    mm_data = batch['radar_data']  # [padded_radar_data, radar_padding_masks]
+                    rfid_data = batch['rfid_data']  # [padded_rfid_data, rfid_padding_masks]
+                
+                # Move data to device
+                mm_data[0] = mm_data[0].to(device)  # padded_radar_data
+                mm_data[1] = mm_data[1].to(device)  # radar_padding_masks
+                rfid_data[0] = rfid_data[0].to(device)  # padded_rfid_data
+                rfid_data[1] = rfid_data[1].to(device)  # rfid_padding_masks
                 
                 action_labels = batch['action_labels'].to(device)
                 obj_labels = batch['obj_labels'].to(device)
@@ -739,7 +720,7 @@ def main():
     
     # Log model settings
     logger.info(f"Model settings: ENCODER_DIM={args.encoder_dim}, FUSION_DIM={args.fusion_dim}, NEURON_NUM={args.neuron_num}")
-    logger.info(f"Model settings: dropout={args.dropout_rate}, antennas={args.num_antennas}, loss_coef={args.loss_coef}")
+    logger.info(f"Model settings: dropout={args.dropout_rate}, loss_coef={args.loss_coef}")
     
     # Log data choices
     logger.info(f"Dataset type: {args.dataset_type}")
@@ -806,7 +787,6 @@ def main():
         action_num=action_num,
         obj_num=obj_num,
         dropout_rate=args.dropout_rate,
-        num_antennas=args.num_antennas,
         data_format='processed'
     )
     model = model.to(device)
@@ -841,7 +821,6 @@ def main():
         f.write(f"Fusion dimension: {args.fusion_dim}\n")
         f.write(f"Neuron number (RFID): {args.neuron_num}\n")
         f.write(f"Dropout rate: {args.dropout_rate}\n")
-        f.write(f"Number of antennas: {args.num_antennas}\n")
         f.write(f"Model size: {model_size[-1]:.2f} MB\n")
         f.write(f"Model parameters: {model_size[1]:,}\n")
         f.write(f"Action classes: {action_num}\n")
