@@ -13,9 +13,11 @@ import matplotlib.pyplot as plt
 import itertools
 
 # Import custom modules
-from model.transformer_model_with_rfid_no_focus import HOINet, loss_fn, classifer_metrics, getModelSize
-from FocusDataset import DatasetwithRFID, new_collate_fn, RealDatasetwithRFID
+from model.transformer_model_with_rfid_no_focus import HOINet as HOINet_NoFocus
+from model.transformer_model_with_rfid import HOINet as HOINet_Focus
+from model.transformer_model_with_rfid_no_focus import loss_fn, classifer_metrics, getModelSize
 import model_utils
+from FocusDataset import DatasetwithRFID, new_collate_fn, RealDatasetwithRFID, FocusDatasetwithRFID, rfid_collate_fn, FocusRealDatasetwithRFID
 
 BEST_ACTION_ACC = 0.0
 BEST_OBJ_ACC = 0.0
@@ -27,21 +29,25 @@ def parse_args():
     parser = argparse.ArgumentParser(description='HOI Recognition Training with Radar and RFID Data')
     
     # Model parameters
+    parser.add_argument('--model_type', type=str, choices=['focus', 'no_focus'], default='focus',
+                        help='Which model architecture to use (focus or no_focus)')
     parser.add_argument('--encoder_dim', type=int, default=256, 
                         help='Dimension of encoder models')
     parser.add_argument('--fusion_dim', type=int, default=512, 
                         help='Dimension for fusion transformer')
     parser.add_argument('--neuron_num', type=int, default=64, 
                         help='Dimension for object branch')
+    parser.add_argument('--num_antennas', type=int, default=12, 
+                        help='Number of antennas in radar data (only used for focus model)')
     parser.add_argument('--dropout_rate', type=float, default=0.2, 
                         help='Dropout rate for all models')
     parser.add_argument('--loss_coef', type=float, default=0.3,
                         help='Weight of the object classification loss')
     
     # Dataset parameters
-    parser.add_argument('--data_dir', type=str, default='/weka/scratch/rzhao36/lwang/datasets/HOI/datasets/classic', 
+    parser.add_argument('--data_dir', type=str, default='/scratch/tshu2/jyu197/Focus_processed_multi_angle_rfid', # '/weka/scratch/rzhao36/lwang/datasets/HOI/datasets/classic', 
                         help='Directory of simulation data with RFID information')
-    parser.add_argument('--real_data_dir', type=str, default='/weka/scratch/rzhao36/lwang/datasets/HOI/RealAction/datasets/classic',
+    parser.add_argument('--real_data_dir', type=str, default='/scratch/tshu2/jyu197/Focus_processed_multi_angle_rfid_real', # '/weka/scratch/rzhao36/lwang/datasets/HOI/RealAction/datasets/classic',
                         help='Directory of real-world data with RFID information')
     parser.add_argument('--use_multi_angle', action='store_true', default=True, 
                         help='Use data from all angles (0, 90, 180, 270) instead of just 90 degrees')
@@ -49,15 +55,15 @@ def parse_args():
                         help='Use noisy data for training instead of simulated data')
     
     # Dataset selection and splitting strategy
-    parser.add_argument('--dataset_type', type=str, choices=['sim', 'real', 'mixed'], default='real',
+    parser.add_argument('--dataset_type', type=str, choices=['sim', 'real', 'mixed'], default='mixed',
                         help='Type of dataset to use: simulated, real-world, or mixed')
-    parser.add_argument('--split_strategy', type=str, choices=['default', 'angle-based', 'random-subset'], default='default',
+    parser.add_argument('--split_strategy', type=str, choices=['default', 'angle-based', 'random-subset'], default='random-subset',
                         help='Strategy for splitting data (default: 70/15/15 random split)')
     parser.add_argument('--train_angles', type=str, nargs='+', default=None,
                         help='Angles to use for training with angle-based splitting (e.g., 0 90)')
     parser.add_argument('--val_angle', type=str, default=None,
                         help='Angle to use for validation with angle-based splitting (e.g., 180)')
-    parser.add_argument('--samples_per_class', type=int, default=None,
+    parser.add_argument('--samples_per_class', type=int, default=150,
                         help='Maximum samples per class for angle-based or random-subset splitting')
     parser.add_argument('--real_split_strategy', type=str, choices=['default', 'angle-based', 'random-subset'], default='random-subset',
                         help='Strategy for splitting real data')
@@ -70,23 +76,23 @@ def parse_args():
     parser.add_argument('--pretrained_path', type=str, 
                         default="/scratch/tshu2/jyu197/XRF55-repo/hoi_model_checkpoints_loss_coef_0.3_neuron_num_64/best.pth.tar",
                         help='Path to pretrained model for transfer learning')
-    parser.add_argument('--finetune', action='store_true', default=False,
+    parser.add_argument('--finetune', action='store_true', default=True,
                         help='Use pretrained model and finetune on real/mixed data')
-    parser.add_argument('--freeze_encoder', action='store_true', default=False,
+    parser.add_argument('--freeze_encoder', action='store_true', default=True,
                         help='Freeze encoder layers during finetuning (only train the classifier head)')
     
     # Training parameters
-    parser.add_argument('--learning_rate', type=float, default=1e-4, 
+    parser.add_argument('--learning_rate', type=float, default=1e-5, 
                         help='Learning rate for optimizer')
     parser.add_argument('--batch_size', type=int, default=32, 
                         help='Batch size for training and validation')
     parser.add_argument('--num_epochs', type=int, default=60, 
                         help='Number of training epochs')
-    parser.add_argument('--num_workers', type=int, default=1, 
+    parser.add_argument('--num_workers', type=int, default=2, 
                         help='Number of workers for data loading')
     
     # Hardware and execution parameters
-    parser.add_argument('--checkpoint_dir', type=str, default='./hoi_model_from_scratch_classic_data', 
+    parser.add_argument('--checkpoint_dir', type=str, default='./hoi_model_mixed_finetune_fix_encoder', 
                         help='Directory to save checkpoints')
     parser.add_argument('--use_bf16', action='store_true', default=True, 
                         help='Use bfloat16 precision if available')
@@ -165,81 +171,154 @@ def get_datasets(args):
         # Simulated data only
         logger.info(f"Using simulated data with {args.split_strategy} splitting strategy")
         
-        train_dataset = DatasetwithRFID(
-            base_dir=args.data_dir,
-            split='train',
-            use_multi_angle=args.use_multi_angle,
-            use_noisy=args.use_noisy,
-            split_strategy=args.split_strategy,
-            train_angles=args.train_angles,
-            val_angle=args.val_angle,
-            samples_per_class=args.samples_per_class
-        )
-        
-        val_dataset = DatasetwithRFID(
-            base_dir=args.data_dir,
-            split='val',
-            use_multi_angle=args.use_multi_angle,
-            use_noisy=args.use_noisy,
-            split_strategy=args.split_strategy,
-            train_angles=args.train_angles,
-            val_angle=args.val_angle,
-            samples_per_class=args.samples_per_class
-        )
+        if args.model_type == 'focus':
+            # Use Focus datasets for Focus model
+            train_dataset = FocusDatasetwithRFID(
+                base_dir=args.data_dir,
+                split='train',
+                use_multi_angle=args.use_multi_angle,
+                use_noisy=args.use_noisy,
+                split_strategy=args.split_strategy,
+                train_angles=args.train_angles,
+                val_angle=args.val_angle,
+                samples_per_class=args.samples_per_class
+            )
+            
+            val_dataset = FocusDatasetwithRFID(
+                base_dir=args.data_dir,
+                split='val',
+                use_multi_angle=args.use_multi_angle,
+                use_noisy=args.use_noisy,
+                split_strategy=args.split_strategy,
+                train_angles=args.train_angles,
+                val_angle=args.val_angle,
+                samples_per_class=args.samples_per_class
+            )
+        else:
+            # Use no-focus datasets for no-focus model
+            train_dataset = DatasetwithRFID(
+                base_dir=args.data_dir,
+                split='train',
+                use_multi_angle=args.use_multi_angle,
+                use_noisy=args.use_noisy,
+                split_strategy=args.split_strategy,
+                train_angles=args.train_angles,
+                val_angle=args.val_angle,
+                samples_per_class=args.samples_per_class
+            )
+            
+            val_dataset = DatasetwithRFID(
+                base_dir=args.data_dir,
+                split='val',
+                use_multi_angle=args.use_multi_angle,
+                use_noisy=args.use_noisy,
+                split_strategy=args.split_strategy,
+                train_angles=args.train_angles,
+                val_angle=args.val_angle,
+                samples_per_class=args.samples_per_class
+            )
         
     elif args.dataset_type == 'real':
         # Real-world data only
         logger.info(f"Using real-world data with {args.real_split_strategy} splitting strategy")
         
-        train_dataset = RealDatasetwithRFID(
-            base_dir=args.real_data_dir,
-            split='train',
-            use_multi_angle=args.use_multi_angle,
-            random_subset_n=args.real_samples_per_class,
-            val_angle=args.real_val_angle
-        )
-        
-        val_dataset = RealDatasetwithRFID(
-            base_dir=args.real_data_dir,
-            split='val',
-            use_multi_angle=args.use_multi_angle,
-            random_subset_n=args.real_samples_per_class,
-            val_angle=args.real_val_angle
-        )
+        if args.model_type == 'focus':
+            train_dataset = FocusRealDatasetwithRFID(
+                base_dir=args.real_data_dir,
+                split='train',
+                use_multi_angle=args.use_multi_angle,
+                random_subset_n=args.real_samples_per_class,
+                val_angle=args.real_val_angle
+            )
+            
+            val_dataset = FocusRealDatasetwithRFID(
+                base_dir=args.real_data_dir,
+                split='val',
+                use_multi_angle=args.use_multi_angle,
+                random_subset_n=args.real_samples_per_class,
+                val_angle=args.real_val_angle
+            )
+        else:
+            train_dataset = RealDatasetwithRFID(
+                base_dir=args.real_data_dir,
+                split='train',
+                use_multi_angle=args.use_multi_angle,
+                random_subset_n=args.real_samples_per_class,
+                val_angle=args.real_val_angle
+            )
+            
+            val_dataset = RealDatasetwithRFID(
+                base_dir=args.real_data_dir,
+                split='val',
+                use_multi_angle=args.use_multi_angle,
+                random_subset_n=args.real_samples_per_class,
+                val_angle=args.real_val_angle
+            )
         
     elif args.dataset_type == 'mixed':
         # Combining real and simulated data for fine-tuning
         logger.info("Using mixed dataset (real + simulated)")
         
-        # Get simulated dataset
-        sim_train_dataset = DatasetwithRFID(
-            base_dir=args.data_dir,
-            split='train',
-            use_multi_angle=args.use_multi_angle,
-            use_noisy=args.use_noisy,
-            split_strategy=args.split_strategy,
-            train_angles=args.train_angles,
-            val_angle=args.val_angle,
-            samples_per_class=args.samples_per_class
-        )
-        
-        # Get real dataset
-        real_train_dataset = RealDatasetwithRFID(
-            base_dir=args.real_data_dir,
-            split='train',
-            use_multi_angle=args.use_multi_angle,
-            random_subset_n=args.real_samples_per_class,
-            val_angle=args.real_val_angle
-        )
-        
-        # For validation, we use real data to match the deployment scenario
-        val_dataset = RealDatasetwithRFID(
-            base_dir=args.real_data_dir,
-            split='val',
-            use_multi_angle=args.use_multi_angle,
-            random_subset_n=args.real_samples_per_class,
-            val_angle=args.real_val_angle
-        )
+        if args.model_type == 'focus':
+            # Get simulated dataset
+            sim_train_dataset = FocusDatasetwithRFID(
+                base_dir=args.data_dir,
+                split='train',
+                use_multi_angle=args.use_multi_angle,
+                use_noisy=args.use_noisy,
+                split_strategy=args.split_strategy,
+                train_angles=args.train_angles,
+                val_angle=args.val_angle,
+                samples_per_class=args.samples_per_class
+            )
+            
+            # Get real dataset
+            real_train_dataset = FocusRealDatasetwithRFID(
+                base_dir=args.real_data_dir,
+                split='train',
+                use_multi_angle=args.use_multi_angle,
+                random_subset_n=args.real_samples_per_class,
+                val_angle=args.real_val_angle
+            )
+            
+            # For validation, we use real data to match the deployment scenario
+            val_dataset = FocusRealDatasetwithRFID(
+                base_dir=args.real_data_dir,
+                split='val',
+                use_multi_angle=args.use_multi_angle,
+                random_subset_n=args.real_samples_per_class,
+                val_angle=args.real_val_angle
+            )
+        else:
+            # Get simulated dataset
+            sim_train_dataset = DatasetwithRFID(
+                base_dir=args.data_dir,
+                split='train',
+                use_multi_angle=args.use_multi_angle,
+                use_noisy=args.use_noisy,
+                split_strategy=args.split_strategy,
+                train_angles=args.train_angles,
+                val_angle=args.val_angle,
+                samples_per_class=args.samples_per_class
+            )
+            
+            # Get real dataset
+            real_train_dataset = RealDatasetwithRFID(
+                base_dir=args.real_data_dir,
+                split='train',
+                use_multi_angle=args.use_multi_angle,
+                random_subset_n=args.real_samples_per_class,
+                val_angle=args.real_val_angle
+            )
+            
+            # For validation, we use real data to match the deployment scenario
+            val_dataset = RealDatasetwithRFID(
+                base_dir=args.real_data_dir,
+                split='val',
+                use_multi_angle=args.use_multi_angle,
+                random_subset_n=args.real_samples_per_class,
+                val_angle=args.real_val_angle
+            )
         
         # Combine datasets
         train_dataset = (sim_train_dataset, real_train_dataset)
@@ -254,48 +333,93 @@ def get_datasets(args):
 
 def load_pretrained_model(model, pretrained_path, freeze_encoder=False):
     """
-    Load a pretrained model for fine-tuning.
+    Load a pretrained model for transfer learning
     
     Args:
-        model: Model to load pretrained weights into
-        pretrained_path: Path to the pretrained model file
+        model: Model to load weights into
+        pretrained_path: Path to pretrained model checkpoint
         freeze_encoder: Whether to freeze encoder layers
         
     Returns:
-        model: Model with pretrained weights
+        model: Model with loaded weights
     """
     logger.info(f"Loading pretrained model from {pretrained_path}")
-    
     if not os.path.exists(pretrained_path):
-        logger.warning(f"Pretrained model not found at {pretrained_path}")
+        logger.warning(f"Pretrained model not found at {pretrained_path}, skipping loading")
         return model
     
-    # Load checkpoint
-    checkpoint = torch.load(pretrained_path, map_location='cpu')
-    
-    # Handle checkpoint format variations
-    if 'state_dict' in checkpoint:
-        state_dict = checkpoint['state_dict']
-    else:
-        state_dict = checkpoint
-    
-    # Load state dict into model
-    model.load_state_dict(state_dict, strict=False)
-    logger.info("Pretrained model loaded successfully")
-    
-    # Freeze encoder layers if specified
-    if freeze_encoder:
-        logger.info("Freezing encoder layers")
-        for name, param in model.named_parameters():
-            if 'encoder' in name or 'feature_extractor' in name:
-                param.requires_grad = False
-                logger.debug(f"Froze parameter: {name}")
-    
-    return model
+    try:
+        checkpoint = torch.load(pretrained_path, map_location='cpu', weights_only=False)
+        state_dict = checkpoint.get('state_dict', checkpoint)  # Handle different checkpoint formats
+        
+        # Filter out classifier if necessary
+        model_dict = model.state_dict()
+        
+        # Handle keys that might have 'module.' prefix due to DataParallel
+        fixed_state_dict = {}
+        for k, v in state_dict.items():
+            if k.startswith('module.'):
+                fixed_state_dict[k[7:]] = v
+            else:
+                fixed_state_dict[k] = v
+        
+        # Update state_dict to only include keys in model_dict
+        fixed_state_dict = {k: v for k, v in fixed_state_dict.items() if k in model_dict}
+        
+        # Check missing keys
+        missing_keys = set(model_dict.keys()) - set(fixed_state_dict.keys())
+        if missing_keys:
+            logger.warning(f"Missing keys in pretrained model: {missing_keys}")
+        
+        # Load weights
+        model.load_state_dict(fixed_state_dict, strict=False)
+        logger.info(f"Successfully loaded pretrained model")
+        
+        # Freeze specific encoder components if requested
+        if freeze_encoder:
+            logger.info("Freezing specific encoder layers")
+            
+            # Define specific encoder components to freeze
+            components_to_freeze = [
+                'mmWaveBranch.range_encoder',
+                'mmWaveBranch.music_encoder',
+                'mmWaveBranch.doppler_encoder',
+                'OBJBranch.encoder'
+            ]
+            
+            # Freeze parameters in the specified components
+            for name, param in model.named_parameters():
+                for component in components_to_freeze:
+                    if component in name:
+                        param.requires_grad = False
+                        logger.debug(f"Froze parameter: {name}")
+                        break
+            
+            # Count and log frozen parameters
+            frozen_count = sum(1 for param in model.parameters() if not param.requires_grad)
+            total_count = sum(1 for _ in model.parameters())
+            logger.info(f"Froze {frozen_count}/{total_count} parameters")
+        
+        return model
+    except Exception as e:
+        logger.error(f"Error loading pretrained model: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return model
 
 class MixedDataLoader:
-    """Custom dataloader to interleave batches from simulated and real datasets"""
+    """Custom dataloader that randomly selects batches from simulated or real data"""
+    
     def __init__(self, sim_dataset, real_dataset, batch_size, shuffle=True, num_workers=1, collate_fn=None, drop_last=False):
+        self.sim_dataset = sim_dataset
+        self.real_dataset = real_dataset
+        self.batch_size = batch_size
+        
+        # Initialize weights for sim and real datasets
+        self.sim_weight = 0.5
+        self.real_weight = 0.5
+        
+        # Create individual dataloaders
         self.sim_loader = DataLoader(
             sim_dataset, 
             batch_size=batch_size, 
@@ -322,9 +446,6 @@ class MixedDataLoader:
         # Create iterators
         self.sim_iter = iter(self.sim_loader)
         self.real_iter = iter(self.real_loader)
-        
-        # Adaptive mixing weights
-        self.sim_weight = 0.5  # Start with equal weighting
         
     def __iter__(self):
         # Reset iterators at the start of each epoch
@@ -364,6 +485,9 @@ def train_and_evaluate(model, train_dataset, val_dataset, optimizer, scheduler, 
     global BEST_ACTION_ACC
     global BEST_OBJ_ACC
     
+    # Determine which collate function to use based on model type
+    collate_fn = rfid_collate_fn if args.model_type == 'focus' else new_collate_fn
+    
     # Create dataloaders based on dataset type
     if isinstance(train_dataset, tuple):
         # Mixed dataset (sim + real) approach
@@ -375,7 +499,7 @@ def train_and_evaluate(model, train_dataset, val_dataset, optimizer, scheduler, 
             batch_size=args.batch_size,
             shuffle=True,
             num_workers=args.num_workers,
-            collate_fn=new_collate_fn
+            collate_fn=collate_fn
         )
         
         val_dataloader = DataLoader(
@@ -383,7 +507,7 @@ def train_and_evaluate(model, train_dataset, val_dataset, optimizer, scheduler, 
             batch_size=args.batch_size,
             shuffle=False,
             num_workers=args.num_workers,
-            collate_fn=new_collate_fn,
+            collate_fn=collate_fn,
             pin_memory=True
         )
         
@@ -400,7 +524,7 @@ def train_and_evaluate(model, train_dataset, val_dataset, optimizer, scheduler, 
             batch_size=args.batch_size, 
             shuffle=True,
             num_workers=args.num_workers,
-            collate_fn=new_collate_fn,
+            collate_fn=collate_fn,
             pin_memory=True
         )
         
@@ -409,7 +533,7 @@ def train_and_evaluate(model, train_dataset, val_dataset, optimizer, scheduler, 
             batch_size=args.batch_size,
             shuffle=False,
             num_workers=args.num_workers,
-            collate_fn=new_collate_fn,
+            collate_fn=collate_fn,
             pin_memory=True
         )
     
@@ -507,11 +631,11 @@ def train_and_evaluate(model, train_dataset, val_dataset, optimizer, scheduler, 
                     mm_data = batch['radar_data']  # This is now [padded_radar_data, radar_padding_masks]
                     rfid_data = batch['rfid_data']  # This is now [padded_rfid_data, rfid_padding_masks]
                 
-                # Move data to device
-                mm_data[0] = mm_data[0].to(device)  # padded_radar_data
-                mm_data[1] = mm_data[1].to(device)  # radar_padding_masks
-                rfid_data[0] = rfid_data[0].to(device)  # padded_rfid_data
-                rfid_data[1] = rfid_data[1].to(device)  # rfid_padding_masks
+                # Move all tensors in mm_data and rfid_data to the selected device
+                for i in range(len(mm_data)):
+                    mm_data[i] = mm_data[i].to(device)
+                for i in range(len(rfid_data)):
+                    rfid_data[i] = rfid_data[i].to(device)
                 
                 action_labels = batch['action_labels'].to(device)
                 obj_labels = batch['obj_labels'].to(device)
@@ -637,8 +761,8 @@ def train_and_evaluate(model, train_dataset, val_dataset, optimizer, scheduler, 
         save_plot(train_losses, val_losses, train_action_accs, val_action_accs, train_obj_accs, val_obj_accs, args)
     
     logger.info(f"Training completed. Best validation metric: {best_val_metric:.4f}")
-    BEST_ACTION_ACC = np.max(train_action_accs)
-    BEST_OBJ_ACC = np.max(train_obj_accs)
+    BEST_ACTION_ACC = np.max(val_action_accs)
+    BEST_OBJ_ACC = np.max(val_obj_accs)
     
 def evaluate(model, dataloader, device, args, loss_coef):
     """Evaluate the model on the given dataloader"""
@@ -662,11 +786,11 @@ def evaluate(model, dataloader, device, args, loss_coef):
                     mm_data = batch['radar_data']  # [padded_radar_data, radar_padding_masks]
                     rfid_data = batch['rfid_data']  # [padded_rfid_data, rfid_padding_masks]
                 
-                # Move data to device
-                mm_data[0] = mm_data[0].to(device)  # padded_radar_data
-                mm_data[1] = mm_data[1].to(device)  # radar_padding_masks
-                rfid_data[0] = rfid_data[0].to(device)  # padded_rfid_data
-                rfid_data[1] = rfid_data[1].to(device)  # rfid_padding_masks
+                # Move all tensors in mm_data and rfid_data to the selected device
+                for i in range(len(mm_data)):
+                    mm_data[i] = mm_data[i].to(device)
+                for i in range(len(rfid_data)):
+                    rfid_data[i] = rfid_data[i].to(device)
                 
                 action_labels = batch['action_labels'].to(device)
                 obj_labels = batch['obj_labels'].to(device)
@@ -711,16 +835,25 @@ def main():
     # Set random seed for reproducibility
     model_utils.setup_seed(args.seed)
     
+    # Update model constants based on model type
+    if args.model_type == 'focus':
+        from model import transformer_model_with_rfid as model_module
+    else:  # no_focus
+        from model import transformer_model_with_rfid_no_focus as model_module
+    
     # Update model constants
-    # Note: This requires importing and modifying the transformer_model_with_rfid module
-    from model import transformer_model_with_rfid_no_focus
-    transformer_model_with_rfid_no_focus.ENCODER_DIM = args.encoder_dim
-    transformer_model_with_rfid_no_focus.FUSION_DIM = args.fusion_dim
-    transformer_model_with_rfid_no_focus.NEURON_NUM = args.neuron_num
+    model_module.ENCODER_DIM = args.encoder_dim
+    model_module.FUSION_DIM = args.fusion_dim
+    model_module.NEURON_NUM = args.neuron_num
     
     # Log model settings
+    logger.info(f"Model type: {args.model_type}")
     logger.info(f"Model settings: ENCODER_DIM={args.encoder_dim}, FUSION_DIM={args.fusion_dim}, NEURON_NUM={args.neuron_num}")
-    logger.info(f"Model settings: dropout={args.dropout_rate}, loss_coef={args.loss_coef}")
+    
+    if args.model_type == 'focus':
+        logger.info(f"Model settings: dropout={args.dropout_rate}, antennas={args.num_antennas}, loss_coef={args.loss_coef}")
+    else:
+        logger.info(f"Model settings: dropout={args.dropout_rate}, loss_coef={args.loss_coef}")
     
     # Log data choices
     logger.info(f"Dataset type: {args.dataset_type}")
@@ -782,13 +915,23 @@ def main():
     logger.info(f"Number of action classes: {action_num}")
     logger.info(f"Number of object classes: {obj_num}")
     
-    # Create model
-    model = HOINet(
-        action_num=action_num,
-        obj_num=obj_num,
-        dropout_rate=args.dropout_rate,
-        data_format='processed'
-    )
+    # Create model based on model type
+    if args.model_type == 'focus':
+        model = HOINet_Focus(
+            action_num=action_num,
+            obj_num=obj_num,
+            dropout_rate=args.dropout_rate,
+            num_antennas=args.num_antennas,
+            data_format='processed'
+        )
+    else:  # no_focus
+        model = HOINet_NoFocus(
+            action_num=action_num,
+            obj_num=obj_num,
+            dropout_rate=args.dropout_rate,
+            data_format='processed'
+        )
+    
     model = model.to(device)
     
     # Load pretrained model for fine-tuning if specified
@@ -808,36 +951,26 @@ def main():
     if not os.path.exists(args.checkpoint_dir):
         os.makedirs(args.checkpoint_dir)
     with open(os.path.join(args.checkpoint_dir, 'training_config.txt'), 'w') as f:
-        f.write(f"Dataset type: {args.dataset_type}\n")
-        f.write(f"Data type: {args.use_noisy and 'noisy' or 'clean'}\n")
-        f.write(f"Learning rate: {args.learning_rate}\n")
-        f.write(f"Batch size: {args.batch_size}\n")
-        f.write(f"Loss coefficient: {loss_coef}\n")
-        f.write(f"BFloat16: {args.use_bf16}\n")
+        # Save all arguments automatically
+        f.write("Command Line Arguments:\n")
+        for arg, value in sorted(vars(args).items()):
+            f.write(f"{arg}: {value}\n")
+        
+        # Add some additional computed/runtime information
+        f.write("\nAdditional Information:\n")
         f.write(f"Device: {device}\n")
-        f.write(f"Number of epochs: {args.num_epochs}\n")
-        f.write(f"Using multi-angle data: {args.use_multi_angle}\n")
-        f.write(f"Encoder dimension: {args.encoder_dim}\n")
-        f.write(f"Fusion dimension: {args.fusion_dim}\n")
-        f.write(f"Neuron number (RFID): {args.neuron_num}\n")
-        f.write(f"Dropout rate: {args.dropout_rate}\n")
         f.write(f"Model size: {model_size[-1]:.2f} MB\n")
         f.write(f"Model parameters: {model_size[1]:,}\n")
         f.write(f"Action classes: {action_num}\n")
         f.write(f"Object classes: {obj_num}\n")
         
         if args.dataset_type == 'sim':
-            f.write(f"Split strategy: {args.split_strategy}\n")
             if args.split_strategy == 'angle-based':
                 f.write(f"Train angles: {args.train_angles}\n")
                 f.write(f"Val angle: {args.val_angle}\n")
-            if args.samples_per_class:
-                f.write(f"Samples per class: {args.samples_per_class}\n")
         elif args.dataset_type in ['real', 'mixed']:
-            f.write(f"Real data split strategy: {args.real_split_strategy}\n")
             if args.real_val_angle:
                 f.write(f"Real val angle: {args.real_val_angle}\n")
-            f.write(f"Real samples per class: {args.real_samples_per_class}\n")
             
         if args.finetune:
             f.write(f"Finetuning from: {args.pretrained_path}\n")

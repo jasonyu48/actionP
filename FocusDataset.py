@@ -1761,7 +1761,7 @@ class DatasetwithRFID(Dataset):
         
         return {
             'radar_data': radar_tensor,  # (time_steps, 3, 256, 256)
-            'noisy_radar_data': noisy_specs_combined,
+            'noisy_radar_data': noisy_specs,
             'clean_rfid_data': clean_rfid_with_obj,  # RFID data with object one-hot encodings
             'noisy_rfid_data': noisy_rfid_with_obj,
             'action_label': action_label,  # Labels
