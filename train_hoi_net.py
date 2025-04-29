@@ -11,6 +11,7 @@ import datetime
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import itertools
+import random
 
 # Import custom modules
 from model.transformer_model_with_rfid_no_focus import HOINet as HOINet_NoFocus
@@ -74,7 +75,7 @@ def parse_args():
     
     # Transfer learning parameters
     parser.add_argument('--pretrained_path', type=str, 
-                        default="/scratch/tshu2/jyu197/XRF55-repo/hoi_model_checkpoints_loss_coef_0.3_neuron_num_64/best.pth.tar",
+                        default="/scratch/tshu2/jyu197/XRF55-repo/hoi_model_from_scratch_classic_data/best.pth.tar",
                         help='Path to pretrained model for transfer learning')
     parser.add_argument('--finetune', action='store_true', default=True,
                         help='Use pretrained model and finetune on real/mixed data')
@@ -88,11 +89,11 @@ def parse_args():
                         help='Batch size for training and validation')
     parser.add_argument('--num_epochs', type=int, default=60, 
                         help='Number of training epochs')
-    parser.add_argument('--num_workers', type=int, default=2, 
+    parser.add_argument('--num_workers', type=int, default=1, 
                         help='Number of workers for data loading')
     
     # Hardware and execution parameters
-    parser.add_argument('--checkpoint_dir', type=str, default='./hoi_model_mixed_finetune_fix_encoder', 
+    parser.add_argument('--checkpoint_dir', type=str, default='./hoi_model_mixed_finetune_fix_encoder_classic_data', 
                         help='Directory to save checkpoints')
     parser.add_argument('--use_bf16', action='store_true', default=True, 
                         help='Use bfloat16 precision if available')
@@ -408,77 +409,100 @@ def load_pretrained_model(model, pretrained_path, freeze_encoder=False):
         return model
 
 class MixedDataLoader:
-    """Custom dataloader that randomly selects batches from simulated or real data"""
-    
-    def __init__(self, sim_dataset, real_dataset, batch_size, shuffle=True, num_workers=1, collate_fn=None, drop_last=False):
-        self.sim_dataset = sim_dataset
-        self.real_dataset = real_dataset
-        self.batch_size = batch_size
-        
-        # Initialize weights for sim and real datasets
-        self.sim_weight = 0.5
-        self.real_weight = 0.5
-        
-        # Create individual dataloaders
+    """Efficient dataloader that interleaves batches from a simulated and a real dataset
+    without ever materialising (and discarding) unused batches.  At every epoch we
+    build a shuffled list containing the desired *order* of dataset sources
+    ("sim" / "real") whose length equals the number of batches in each individual
+    DataLoader.  Then we just draw the next batch from the corresponding iterator.
+
+    This removes the previous implementation's costly "skip_count" loops that
+    loaded and pinned large batches only to throw them away, a major source of
+    host-RAM bloat and I/O overhead.
+    """
+
+    def __init__(
+        self,
+        sim_dataset,
+        real_dataset,
+        batch_size: int,
+        shuffle: bool = True,
+        num_workers: int = 1,
+        collate_fn=None,
+        drop_last: bool = False,
+        pin_memory: bool = True,
+    ):
+        # Build the underlying DataLoaders
         self.sim_loader = DataLoader(
-            sim_dataset, 
-            batch_size=batch_size, 
+            sim_dataset,
+            batch_size=batch_size,
             shuffle=shuffle,
             num_workers=num_workers,
             collate_fn=collate_fn,
-            pin_memory=True,
-            drop_last=drop_last
+            pin_memory=pin_memory,
+            drop_last=drop_last,
         )
-        
+
         self.real_loader = DataLoader(
-            real_dataset, 
-            batch_size=batch_size, 
+            real_dataset,
+            batch_size=batch_size,
             shuffle=shuffle,
             num_workers=num_workers,
             collate_fn=collate_fn,
-            pin_memory=True,
-            drop_last=drop_last
+            pin_memory=pin_memory,
+            drop_last=drop_last,
         )
-        
-        # Calculate length - use the longer dataloader
-        self.length = max(len(self.sim_loader), len(self.real_loader))
-        
-        # Create iterators
-        self.sim_iter = iter(self.sim_loader)
-        self.real_iter = iter(self.real_loader)
-        
+
+        self.shuffle = shuffle
+
+    # ------------------------------------------------------------------
+    # Python iterator protocol
+    # ------------------------------------------------------------------
     def __iter__(self):
-        # Reset iterators at the start of each epoch
+        # Fresh iterator for each epoch
         self.sim_iter = iter(self.sim_loader)
         self.real_iter = iter(self.real_loader)
+
+        # Build the epoch sequence of sources ("sim" / "real")
+        self.batch_sequence = ["sim"] * len(self.sim_loader) + [
+            "real"
+        ] * len(self.real_loader)
+        if self.shuffle:
+            random.shuffle(self.batch_sequence)
+        self._seq_idx = 0
         return self
-    
+
     def __next__(self):
-        # Weighted random selection of dataset
-        if np.random.random() < self.sim_weight:
-            try:
-                return next(self.sim_iter), 'sim'
-            except StopIteration:
-                # If sim is exhausted, reset it and return real
-                self.sim_iter = iter(self.sim_loader)
-                return next(self.real_iter), 'real'
-        else:
-            try:
-                return next(self.real_iter), 'real'
-            except StopIteration:
-                # If real is exhausted, reset it and return sim
-                self.real_iter = iter(self.real_loader)
-                return next(self.sim_iter), 'sim'
-    
+        while self._seq_idx < len(self.batch_sequence):
+            src = self.batch_sequence[self._seq_idx]
+            self._seq_idx += 1
+
+            if src == "sim":
+                try:
+                    batch = next(self.sim_iter)
+                    return batch, src
+                except StopIteration:
+                    # simulated loader exhausted early → fall through and continue
+                    continue
+            else:  # src == "real"
+                try:
+                    batch = next(self.real_iter)
+                    return batch, src
+                except StopIteration:
+                    continue
+        # If we reach here, both loaders are exhausted
+        raise StopIteration
+
+    # ------------------------------------------------------------------
+    # Misc helpers
+    # ------------------------------------------------------------------
     def __len__(self):
-        return self.length
-    
-    def update_weights(self, sim_loss, real_loss):
-        """Adaptively update mixing weights based on relative loss magnitudes"""
-        total = sim_loss + real_loss
-        if total > 0:
-            self.sim_weight = real_loss / total  # More weight to dataset with higher loss
-    
+        # Number of batches produced in one epoch
+        return len(self.sim_loader) + len(self.real_loader)
+
+    def update_weights(self, *_, **__):
+        """Kept for backwards compatibility; no adaptive weights here."""
+        pass
+
 def train_and_evaluate(model, train_dataset, val_dataset, optimizer, scheduler, args, loss_coef):
     """Train the model and evaluate on validation set"""
     
@@ -510,10 +534,6 @@ def train_and_evaluate(model, train_dataset, val_dataset, optimizer, scheduler, 
             collate_fn=collate_fn,
             pin_memory=True
         )
-        
-        # Track separate losses for sim and real data
-        sim_losses = []
-        real_losses = []
     else:
         # Single dataset approach
         data_type = args.dataset_type
@@ -543,79 +563,50 @@ def train_and_evaluate(model, train_dataset, val_dataset, optimizer, scheduler, 
         
     # Setup for mixed precision training with bfloat16
     scaler = None
-    if args.use_bf16 and torch.cuda.is_available():
-        # Get device capability
-        device_capability = torch.cuda.get_device_capability()
-        has_bf16_support = device_capability[0] >= 8  # Ampere (sm_80) and above support BF16
-        
-        if has_bf16_support:
-            logger.info("Using bfloat16 mixed precision training")
-            # No scaler is needed for BF16, unlike FP16
-        else:
-            logger.info("BF16 not supported on this device. Using FP32.")
-            args.use_bf16 = False
-    else:
-        logger.info("Not using mixed precision training")
+    if args.use_bf16 and torch.cuda.get_device_capability()[0] >= 8:
+        logger.info("Using bfloat16 mixed precision training")
+        # Note: Scaler not used with bfloat16, just using autocast directly
     
-    # Variables to track best model and training history
-    best_val_metric = 0.0  # Will be the average of action and object accuracies
+    # Training loop
+    device = next(model.parameters()).device
     train_losses = []
     val_losses = []
     train_action_accs = []
     val_action_accs = []
     train_obj_accs = []
     val_obj_accs = []
+    best_val_metric = 0
     
-    # For mixed datasets
-    epoch_sim_loss = 0
-    epoch_real_loss = 0
-    epoch_sim_samples = 0
-    epoch_real_samples = 0
-    
-    # Starting epoch
-    start_epoch = 0
-    
-    # Resume from checkpoint if specified
-    if args.resume:
-        checkpoint_path = os.path.join(args.checkpoint_dir, 'best.pth.tar')
-        if os.path.exists(checkpoint_path):
-            logger.info(f"Loading checkpoint from {checkpoint_path}")
-            checkpoint = model_utils.load_checkpoint(checkpoint_path, model, optimizer)
-            start_epoch = checkpoint['epoch']
-            best_val_metric = checkpoint.get('val_metric', 0.0)
-            train_losses = checkpoint.get('train_losses', [])
-            val_losses = checkpoint.get('val_losses', [])
-            train_action_accs = checkpoint.get('train_action_accs', [])
-            val_action_accs = checkpoint.get('val_action_accs', [])
-            train_obj_accs = checkpoint.get('train_obj_accs', [])
-            val_obj_accs = checkpoint.get('val_obj_accs', [])
-            logger.info(f"Checkpoint loaded. Resuming from epoch {start_epoch}")
-        else:
-            logger.warning(f"No checkpoint found at {checkpoint_path}. Starting from scratch.")
-    
-    # Training loop
-    for epoch in range(start_epoch, args.num_epochs):
+    for epoch in range(args.num_epochs):
         logger.info(f"Starting epoch {epoch+1}/{args.num_epochs}")
-        
-        # Set model to training mode
         model.train()
         
-        # Track metrics
+        # Metrics for this epoch
         epoch_loss = 0
         epoch_samples = 0
         epoch_sim_loss = 0
-        epoch_real_loss = 0
         epoch_sim_samples = 0
+        epoch_real_loss = 0
         epoch_real_samples = 0
-        all_action_preds = []
-        all_action_labels = []
-        all_obj_preds = []
-        all_obj_labels = []
         
-        # Use tqdm for progress bar
+        # For metrics calculation - use rolling accumulation to avoid storing all outputs
+        all_action_outputs_list = []
+        all_action_labels_list = []
+        all_obj_outputs_list = []
+        all_obj_labels_list = []
+        
+        # Use fixed-size tensors for accumulation
+        max_batches_to_accumulate = min(50, len(train_dataloader))
+        action_output_accum = None
+        action_label_accum = None
+        obj_output_accum = None
+        obj_label_accum = None
+        current_batch_count = 0
+        
+        # Progress bar
         with tqdm(total=len(train_dataloader), desc=f"Epoch {epoch+1}/{args.num_epochs} [Train]") as pbar:
             for batch_idx, batch_data in enumerate(train_dataloader):
-                # Handle mixed dataset with separate batch structure
+                # Unpack batch data based on dataset type
                 if isinstance(train_dataset, tuple):
                     batch, batch_type = batch_data
                     is_sim_batch = (batch_type == 'sim')
@@ -670,74 +661,114 @@ def train_and_evaluate(model, train_dataset, val_dataset, optimizer, scheduler, 
                         epoch_real_loss += batch_loss.item() * batch_size
                         epoch_real_samples += batch_size
                 
-                # Track predictions
-                _, action_preds = torch.max(action_output, 1)
-                all_action_preds.extend(action_preds.cpu().numpy())
-                all_action_labels.extend(action_labels.cpu().numpy())
+                # Accumulate predictions for metrics in a memory-efficient way
+                if current_batch_count < max_batches_to_accumulate:
+                    # Detach tensors to free computation graph
+                    action_output_cpu = action_output.detach().cpu()
+                    action_labels_cpu = action_labels.cpu()
+                    obj_output_cpu = obj_output.detach().cpu()
+                    obj_labels_cpu = obj_labels.cpu()
+                    
+                    if action_output_accum is None:
+                        action_output_accum = action_output_cpu
+                        action_label_accum = action_labels_cpu
+                        obj_output_accum = obj_output_cpu
+                        obj_label_accum = obj_labels_cpu
+                    else:
+                        action_output_accum = torch.cat([action_output_accum, action_output_cpu], dim=0)
+                        action_label_accum = torch.cat([action_label_accum, action_labels_cpu], dim=0)
+                        obj_output_accum = torch.cat([obj_output_accum, obj_output_cpu], dim=0)
+                        obj_label_accum = torch.cat([obj_label_accum, obj_labels_cpu], dim=0)
+                    
+                    current_batch_count += 1
+                    
+                    # If we've reached the limit, compute metrics and reset
+                    if current_batch_count == max_batches_to_accumulate or batch_idx == len(train_dataloader) - 1:
+                        metrics = classifer_metrics(action_output_accum, action_label_accum, obj_output_accum, obj_label_accum)
+                        all_action_outputs_list.append(metrics['Action Accuracy'])
+                        all_obj_outputs_list.append(metrics['Object Accuracy'])
+                        
+                        # Clear accumulation tensors to free memory
+                        action_output_accum = None
+                        action_label_accum = None
+                        obj_output_accum = None
+                        obj_label_accum = None
+                        current_batch_count = 0
                 
-                _, obj_preds = torch.max(obj_output, 1)
-                all_obj_preds.extend(obj_preds.cpu().numpy())
-                all_obj_labels.extend(obj_labels.cpu().numpy())
+                # Clean up to free memory
+                del mm_data, rfid_data, action_labels, obj_labels, action_output, obj_output, batch_loss
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 
-                # Update progress bar
+                # Update progress bar with metrics
+                avg_loss = epoch_loss / epoch_samples
+                pbar.set_postfix(loss=f"{avg_loss:.4f}")
                 pbar.update(1)
-                pbar.set_postfix({'loss': batch_loss.item()})
+                
+                # Update mixed dataloader weights if applicable
+                if isinstance(train_dataloader, MixedDataLoader) and epoch_sim_samples > 0 and epoch_real_samples > 0:
+                    sim_avg_loss = epoch_sim_loss / epoch_sim_samples if epoch_sim_samples > 0 else 0
+                    real_avg_loss = epoch_real_loss / epoch_real_samples if epoch_real_samples > 0 else 0
+                    train_dataloader.update_weights(sim_avg_loss, real_avg_loss)
         
-        # Calculate epoch metrics
-        train_loss = epoch_loss / epoch_samples
-        train_action_acc = np.mean(np.array(all_action_preds) == np.array(all_action_labels))
-        train_obj_acc = np.mean(np.array(all_obj_preds) == np.array(all_obj_labels))
+        # Calculate average metrics for the epoch
+        avg_train_loss = epoch_loss / epoch_samples
+        avg_train_action_acc = np.mean(all_action_outputs_list) if all_action_outputs_list else 0
+        avg_train_obj_acc = np.mean(all_obj_outputs_list) if all_obj_outputs_list else 0
         
-        # Track separate metrics for mixed dataset
+        # Log training metrics
+        logger.info(f"Train Loss: {avg_train_loss:.4f}, Action Acc: {avg_train_action_acc:.4f}, Obj Acc: {avg_train_obj_acc:.4f}")
+        
         if isinstance(train_dataset, tuple) and epoch_sim_samples > 0 and epoch_real_samples > 0:
-            sim_loss = epoch_sim_loss / epoch_sim_samples
-            real_loss = epoch_real_loss / epoch_real_samples
-            sim_losses.append(sim_loss)
-            real_losses.append(real_loss)
-            
-            logger.info(f"Sim Loss: {sim_loss:.4f}, Real Loss: {real_loss:.4f}")
-            
-            # Update mixing weights for next epoch
-            train_dataloader.update_weights(sim_loss, real_loss)
+            sim_avg_loss = epoch_sim_loss / epoch_sim_samples
+            real_avg_loss = epoch_real_loss / epoch_real_samples
+            logger.info(f"Sim Loss: {sim_avg_loss:.4f}, Real Loss: {real_avg_loss:.4f}")
         
         # Evaluate on validation set
         val_loss, val_metrics = evaluate(model, val_dataloader, device, args, loss_coef)
         val_action_acc = val_metrics['Action Accuracy']
         val_obj_acc = val_metrics['Object Accuracy']
+        val_action_f1 = val_metrics['Action F1 score']
+        val_obj_f1 = val_metrics['Object F1 score']
         
-        # Calculate combined metric (average of action and object accuracies)
-        val_metric = (val_action_acc + val_obj_acc) / 2
+        # Log validation metrics
+        logger.info(f"Val Loss: {val_loss:.4f}, Action Acc: {val_action_acc:.4f}, Obj Acc: {val_obj_acc:.4f}")
+        logger.info(f"Action F1: {val_action_f1:.4f}, Obj F1: {val_obj_f1:.4f}")
         
-        # Update learning rate scheduler
-        scheduler.step()
+        # Update learning rate
+        if scheduler is not None:
+            scheduler.step()
+            logger.info(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
         
-        # Log metrics
-        logger.info(f"Epoch {epoch+1}/{args.num_epochs} - "
-                  f"Train Loss: {train_loss:.4f}, "
-                  f"Train Action Acc: {train_action_acc:.4f}, "
-                  f"Train Obj Acc: {train_obj_acc:.4f}, "
-                  f"Val Loss: {val_loss:.4f}, "
-                  f"Val Action Acc: {val_action_acc:.4f}, "
-                  f"Val Obj Acc: {val_obj_acc:.4f}")
-        
-        # Store history
-        train_losses.append(train_loss)
+        # Save metrics
+        train_losses.append(avg_train_loss)
         val_losses.append(val_loss)
-        train_action_accs.append(train_action_acc)
+        train_action_accs.append(avg_train_action_acc)
         val_action_accs.append(val_action_acc)
-        train_obj_accs.append(train_obj_acc)
+        train_obj_accs.append(avg_train_obj_acc)
         val_obj_accs.append(val_obj_acc)
         
-        # Save checkpoint
+        # Calculate combined validation metric (equal weighting of action and object accuracy)
+        val_metric = 0.5 * val_action_acc + 0.5 * val_obj_acc
+        
+        # Check if this is the best model so far
         is_best = val_metric > best_val_metric
         if is_best:
             best_val_metric = val_metric
-            
+            logger.info(f"New best model! Val metric: {val_metric:.4f}")
+        
         # Checkpoint state
         state = {
             'epoch': epoch + 1,
             'state_dict': model.state_dict(),
             'optim_dict': optimizer.state_dict(),
+            'val_metric': val_metric,
+        }
+        
+        # Save only metrics and hyperparameters to a separate smaller file
+        # to avoid storing large tensors in the training history
+        metrics_state = {
+            'epoch': epoch + 1,
             'train_losses': train_losses,
             'val_losses': val_losses,
             'train_action_accs': train_action_accs,
@@ -755,25 +786,45 @@ def train_and_evaluate(model, train_dataset, val_dataset, optimizer, scheduler, 
             'dataset_type': args.dataset_type
         }
         
-        model_utils.save_checkpoint(state, is_best, args.checkpoint_dir)
+        # Save the full checkpoint only if it's the best model
+        if is_best:
+            model_utils.save_checkpoint(state, is_best, args.checkpoint_dir)
+        
+        # Otherwise just save the metrics
+        metrics_path = os.path.join(args.checkpoint_dir, 'metrics.pth.tar')
+        torch.save(metrics_state, metrics_path)
         
         # Save training plots
         save_plot(train_losses, val_losses, train_action_accs, val_action_accs, train_obj_accs, val_obj_accs, args)
+        
+        # Clean up to free memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     
     logger.info(f"Training completed. Best validation metric: {best_val_metric:.4f}")
     BEST_ACTION_ACC = np.max(val_action_accs)
     BEST_OBJ_ACC = np.max(val_obj_accs)
-    
+
 def evaluate(model, dataloader, device, args, loss_coef):
     """Evaluate the model on the given dataloader"""
     model.eval()
     
     total_loss = 0
     total_samples = 0
-    all_action_outputs = []
-    all_action_labels = []
-    all_obj_outputs = []
-    all_obj_labels = []
+    
+    # Use fixed-size tensors for accumulation
+    max_batches_to_accumulate = min(50, len(dataloader))
+    action_output_accum = None
+    action_label_accum = None
+    obj_output_accum = None
+    obj_label_accum = None
+    current_batch_count = 0
+    
+    # Store metrics from each accumulated batch
+    action_acc_list = []
+    action_f1_list = []
+    obj_acc_list = []
+    obj_f1_list = []
     
     with torch.no_grad():
         with tqdm(total=len(dataloader), desc="Evaluation") as pbar:
@@ -808,23 +859,57 @@ def evaluate(model, dataloader, device, args, loss_coef):
                 total_loss += batch_loss.item() * action_labels.size(0)
                 total_samples += action_labels.size(0)
                 
-                # Track outputs for metrics
-                all_action_outputs.append(action_output)
-                all_action_labels.append(action_labels)
-                all_obj_outputs.append(obj_output)
-                all_obj_labels.append(obj_labels)
+                # Accumulate predictions for metrics in a memory-efficient way
+                action_output_cpu = action_output.cpu()
+                action_labels_cpu = action_labels.cpu()
+                obj_output_cpu = obj_output.cpu()
+                obj_labels_cpu = obj_labels.cpu()
+                
+                if action_output_accum is None:
+                    action_output_accum = action_output_cpu
+                    action_label_accum = action_labels_cpu
+                    obj_output_accum = obj_output_cpu
+                    obj_label_accum = obj_labels_cpu
+                else:
+                    action_output_accum = torch.cat([action_output_accum, action_output_cpu], dim=0)
+                    action_label_accum = torch.cat([action_label_accum, action_labels_cpu], dim=0)
+                    obj_output_accum = torch.cat([obj_output_accum, obj_output_cpu], dim=0)
+                    obj_label_accum = torch.cat([obj_label_accum, obj_labels_cpu], dim=0)
+                
+                current_batch_count += 1
+                
+                # If we've reached the limit, compute metrics and reset
+                if current_batch_count == max_batches_to_accumulate or batch_idx == len(dataloader) - 1:
+                    metrics = classifer_metrics(action_output_accum, action_label_accum, obj_output_accum, obj_label_accum)
+                    action_acc_list.append(metrics['Action Accuracy'])
+                    action_f1_list.append(metrics['Action F1 score'])
+                    obj_acc_list.append(metrics['Object Accuracy'])
+                    obj_f1_list.append(metrics['Object F1 score'])
+                    
+                    # Clear accumulation tensors to free memory
+                    action_output_accum = None
+                    action_label_accum = None
+                    obj_output_accum = None
+                    obj_label_accum = None
+                    current_batch_count = 0
+                
+                # Clean up to free memory
+                del mm_data, rfid_data, action_labels, obj_labels, action_output, obj_output, batch_loss
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 
                 pbar.update(1)
     
-    # Calculate metrics
-    all_action_outputs = torch.cat(all_action_outputs, dim=0)
-    all_action_labels = torch.cat(all_action_labels, dim=0)
-    all_obj_outputs = torch.cat(all_obj_outputs, dim=0)
-    all_obj_labels = torch.cat(all_obj_labels, dim=0)
-    
-    metrics = classifer_metrics(all_action_outputs, all_action_labels, all_obj_outputs, all_obj_labels)
-    
+    # Calculate weighted average of metrics
     avg_loss = total_loss / total_samples
+    
+    # Compute average metrics
+    metrics = {
+        'Action Accuracy': np.mean(action_acc_list),
+        'Action F1 score': np.mean(action_f1_list),
+        'Object Accuracy': np.mean(obj_acc_list),
+        'Object F1 score': np.mean(obj_f1_list)
+    }
     
     return avg_loss, metrics
 

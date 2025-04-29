@@ -1014,15 +1014,11 @@ class FocusDatasetwithRFID(Dataset):
         sim_RDspecs = sim_radar_data['RDspecs']
         sim_AoAspecs = sim_radar_data['AoAspecs']
         
-        # Convert simulated data to PyTorch tensors
-        sim_RDspecs = torch.from_numpy(sim_RDspecs).float()
-        sim_AoAspecs = torch.from_numpy(sim_AoAspecs).float()
-        
         # Load noisy radar data if available and requested
         if self.use_noisy and sample['noisy_radar_path'] is not None:
             noisy_radar_data = np.load(sample['noisy_radar_path'])
-            noisy_RDspecs = torch.from_numpy(noisy_radar_data['RDspecs']).float()
-            noisy_AoAspecs = torch.from_numpy(noisy_radar_data['AoAspecs']).float()
+            noisy_RDspecs = noisy_radar_data['RDspecs']
+            noisy_AoAspecs = noisy_radar_data['AoAspecs']
         else:
             # Fall back to using simulated data
             noisy_RDspecs = sim_RDspecs
@@ -1050,23 +1046,18 @@ class FocusDatasetwithRFID(Dataset):
                 one_hot[self.object_to_idx[obj_name]] = 1.0
             obj_one_hot_encodings.append(one_hot)
         
-        # Convert to tensor and reshape to match RFID data format
+        # Convert to numpy array
         obj_one_hot_encodings = np.array(obj_one_hot_encodings)
-        obj_one_hot_tensor = torch.from_numpy(obj_one_hot_encodings).float()
         
         # Expand the one-hot encodings to match the time dimension of RFID data
         time_steps = clean_rfid_data.shape[0]
-        expanded_obj_one_hot = obj_one_hot_tensor.unsqueeze(0).expand(time_steps, -1, -1)  # (time_steps, 6, 8)
-        
-        # Convert RFID data to PyTorch tensors
-        clean_rfid_data = torch.from_numpy(clean_rfid_data).float()
-        noisy_rfid_data = torch.from_numpy(noisy_rfid_data).float()
+        expanded_obj_one_hot = np.zeros((time_steps, obj_one_hot_encodings.shape[0], obj_one_hot_encodings.shape[1]))
+        for t in range(time_steps):
+            expanded_obj_one_hot[t] = obj_one_hot_encodings
         
         # Concatenate one-hot encodings with RFID data along the last dimension
-        # Assuming clean_rfid_data and noisy_rfid_data have shape (time_steps, 6, 4)
-        # Add the one-hot encodings to create (time_steps, 6, 4+8)
-        clean_rfid_with_obj = torch.cat([clean_rfid_data, expanded_obj_one_hot], dim=-1)
-        noisy_rfid_with_obj = torch.cat([noisy_rfid_data, expanded_obj_one_hot], dim=-1)
+        clean_rfid_with_obj = np.concatenate([clean_rfid_data, expanded_obj_one_hot], axis=-1)
+        noisy_rfid_with_obj = np.concatenate([noisy_rfid_data, expanded_obj_one_hot], axis=-1)
         
         # Get labels
         action_label = sample['action_label']
@@ -1075,14 +1066,15 @@ class FocusDatasetwithRFID(Dataset):
         # Get angle
         angle = int(sample['angle'])
         
+        # Convert to PyTorch tensors only at the end
         return {
-            'sim_RDspecs': sim_RDspecs,  # Radar data
-            'sim_AoAspecs': sim_AoAspecs,
-            'noisy_RDspecs': noisy_RDspecs,
-            'noisy_AoAspecs': noisy_AoAspecs,
-            'clean_rfid_data': clean_rfid_with_obj,  # RFID data with object one-hot encodings
-            'noisy_rfid_data': noisy_rfid_with_obj,
-            'action_label': action_label,  # Labels
+            'sim_RDspecs': torch.from_numpy(sim_RDspecs).float(),
+            'sim_AoAspecs': torch.from_numpy(sim_AoAspecs).float(),
+            'noisy_RDspecs': torch.from_numpy(noisy_RDspecs).float(),
+            'noisy_AoAspecs': torch.from_numpy(noisy_AoAspecs).float(),
+            'clean_rfid_data': torch.from_numpy(clean_rfid_with_obj).float(),
+            'noisy_rfid_data': torch.from_numpy(noisy_rfid_with_obj).float(),
+            'action_label': action_label,
             'obj_label': obj_label,
             'angle': angle
         }
@@ -1348,8 +1340,8 @@ class FocusRealDatasetwithRFID(Dataset):
 
         # ---------------------------- Radar ----------------------------
         radar_npz = np.load(sample['radar_path'])
-        sim_RDspecs = torch.from_numpy(radar_npz['RDspecs']).float()
-        sim_AoAspecs = torch.from_numpy(radar_npz['AoAspecs']).float()
+        sim_RDspecs = radar_npz['RDspecs']
+        sim_AoAspecs = radar_npz['AoAspecs']
 
         # For compatibility with rfid_collate_fn, we expose the real data twice
         noisy_RDspecs = sim_RDspecs
@@ -1357,30 +1349,34 @@ class FocusRealDatasetwithRFID(Dataset):
 
         # ----------------------------- RFID ----------------------------
         rfid_data_np = np.load(sample['rfid_path'])
-        clean_rfid_tensor = torch.from_numpy(rfid_data_np).float()
-        noisy_rfid_tensor = clean_rfid_tensor  # identical for real-world dataset
-
-        # Object one-hot encoding
+        
+        # Load object names data
         obj_names = np.load(sample['obj_names_path'], allow_pickle=True)
+        
+        # Create one-hot encodings for objects
         one_hots = np.zeros((len(obj_names), len(self.object_names)), dtype=np.float32)
         for i, obj_name in enumerate(obj_names):
             if obj_name in self.object_to_idx:
                 one_hots[i, self.object_to_idx[obj_name]] = 1.0
-        one_hots = torch.from_numpy(one_hots)  # (N_tags, 8)
+        
+        # Expand one-hot encodings to match time dimension
+        time_steps = rfid_data_np.shape[0]
+        expanded_one_hots = np.zeros((time_steps, one_hots.shape[0], one_hots.shape[1]), dtype=np.float32)
+        for t in range(time_steps):
+            expanded_one_hots[t] = one_hots
+        
+        # Concatenate RFID data with object encodings
+        clean_rfid_with_obj = np.concatenate([rfid_data_np, expanded_one_hots], axis=-1)
+        noisy_rfid_with_obj = clean_rfid_with_obj.copy()  # identical for real-world dataset
 
-        time_steps = clean_rfid_tensor.shape[0]
-        expanded_one_hots = one_hots.unsqueeze(0).expand(time_steps, -1, -1)  # (T, N_tags, 8)
-
-        clean_rfid_with_obj = torch.cat([clean_rfid_tensor, expanded_one_hots], dim=-1)
-        noisy_rfid_with_obj = clean_rfid_with_obj  # identical
-
+        # Convert to PyTorch tensors only at the end
         return {
-            'sim_RDspecs': sim_RDspecs,
-            'sim_AoAspecs': sim_AoAspecs,
-            'noisy_RDspecs': noisy_RDspecs,
-            'noisy_AoAspecs': noisy_AoAspecs,
-            'clean_rfid_data': clean_rfid_with_obj,
-            'noisy_rfid_data': noisy_rfid_with_obj,
+            'sim_RDspecs': torch.from_numpy(sim_RDspecs).float(),
+            'sim_AoAspecs': torch.from_numpy(sim_AoAspecs).float(),
+            'noisy_RDspecs': torch.from_numpy(noisy_RDspecs).float(),
+            'noisy_AoAspecs': torch.from_numpy(noisy_AoAspecs).float(),
+            'clean_rfid_data': torch.from_numpy(clean_rfid_with_obj).float(),
+            'noisy_rfid_data': torch.from_numpy(noisy_rfid_with_obj).float(),
             'action_label': sample['action_label'],
             'obj_label': sample['obj_label'],
             'angle': int(sample['angle']),
@@ -1701,16 +1697,12 @@ class DatasetwithRFID(Dataset):
         # Load radar data - CHANGED FOR CLASSIC FORMAT
         sim_radar_data = np.load(sample['sim_radar_path'])  # Now using specs.npy - shape (time_steps, 3, 256, 256)
         
-        # Stack spectrograms to make the data shape consistent with the model expectation
-        radar_tensor = torch.from_numpy(sim_radar_data).float()
-        
         # Load noisy radar data if available and requested
         if self.use_noisy and sample['noisy_radar_path'] is not None:
             noisy_radar_data = np.load(sample['noisy_radar_path'])  # Now using sim2real_specs.npy
-            noisy_specs = torch.from_numpy(noisy_radar_data).float()
         else:
             # Fall back to using simulated data
-            noisy_specs = radar_tensor
+            noisy_radar_data = sim_radar_data
         
         # Load RFID data
         clean_rfid_data = np.load(sample['clean_rfid_path'])
@@ -1734,23 +1726,20 @@ class DatasetwithRFID(Dataset):
                 one_hot[self.object_to_idx[obj_name]] = 1.0
             obj_one_hot_encodings.append(one_hot)
         
-        # Convert to tensor and reshape to match RFID data format
+        # Convert to numpy array
         obj_one_hot_encodings = np.array(obj_one_hot_encodings)
-        obj_one_hot_tensor = torch.from_numpy(obj_one_hot_encodings).float()
         
         # Expand the one-hot encodings to match the time dimension of RFID data
         time_steps = clean_rfid_data.shape[0]
-        expanded_obj_one_hot = obj_one_hot_tensor.unsqueeze(0).expand(time_steps, -1, -1)  # (time_steps, 6, 8)
-        
-        # Convert RFID data to PyTorch tensors
-        clean_rfid_data = torch.from_numpy(clean_rfid_data).float()
-        noisy_rfid_data = torch.from_numpy(noisy_rfid_data).float()
+        expanded_obj_one_hot = np.zeros((time_steps, obj_one_hot_encodings.shape[0], obj_one_hot_encodings.shape[1]))
+        for t in range(time_steps):
+            expanded_obj_one_hot[t] = obj_one_hot_encodings
         
         # Concatenate one-hot encodings with RFID data along the last dimension
         # Assuming clean_rfid_data and noisy_rfid_data have shape (time_steps, 6, 4)
         # Add the one-hot encodings to create (time_steps, 6, 4+8)
-        clean_rfid_with_obj = torch.cat([clean_rfid_data, expanded_obj_one_hot], dim=-1)
-        noisy_rfid_with_obj = torch.cat([noisy_rfid_data, expanded_obj_one_hot], dim=-1)
+        clean_rfid_with_obj = np.concatenate([clean_rfid_data, expanded_obj_one_hot], axis=-1)
+        noisy_rfid_with_obj = np.concatenate([noisy_rfid_data, expanded_obj_one_hot], axis=-1)
         
         # Get labels
         action_label = sample['action_label']
@@ -1759,12 +1748,13 @@ class DatasetwithRFID(Dataset):
         # Get angle
         angle = int(sample['angle'])
         
+        # Convert to PyTorch tensors only at the end
         return {
-            'radar_data': radar_tensor,  # (time_steps, 3, 256, 256)
-            'noisy_radar_data': noisy_specs,
-            'clean_rfid_data': clean_rfid_with_obj,  # RFID data with object one-hot encodings
-            'noisy_rfid_data': noisy_rfid_with_obj,
-            'action_label': action_label,  # Labels
+            'radar_data': torch.from_numpy(sim_radar_data).float(),
+            'noisy_radar_data': torch.from_numpy(noisy_radar_data).float(),
+            'clean_rfid_data': torch.from_numpy(clean_rfid_with_obj).float(),
+            'noisy_rfid_data': torch.from_numpy(noisy_rfid_with_obj).float(),
+            'action_label': action_label,  # Keep scalar values as is
             'obj_label': obj_label,
             'angle': angle
         }
@@ -2027,36 +2017,37 @@ class RealDatasetwithRFID(Dataset):
         # Load and process radar data - CHANGED FOR CLASSIC FORMAT
         radar_data = np.load(sample['radar_path'])  # shape (time_steps, 3, 256, 256)
         
-        # Stack spectrograms to make the data shape consistent with the model expectation
-        radar_tensor = torch.from_numpy(radar_data).float()
-        
-        # For compatibility with the training code, we expose the same data for both clean and noisy
-        noisy_radar_tensor = radar_tensor
+        # For compatibility with the training code, we use the same data for both clean and noisy
+        noisy_radar_data = radar_data.copy()
 
         # ----------------------------- RFID ----------------------------
         rfid_data_np = np.load(sample['rfid_path'])
-        clean_rfid_tensor = torch.from_numpy(rfid_data_np).float()
-        noisy_rfid_tensor = clean_rfid_tensor  # identical for real-world dataset
-
-        # Object one-hot encoding
+        
+        # Load object names data
         obj_names = np.load(sample['obj_names_path'], allow_pickle=True)
+        
+        # Create one-hot encodings for objects
         one_hots = np.zeros((len(obj_names), len(self.object_names)), dtype=np.float32)
         for i, obj_name in enumerate(obj_names):
             if obj_name in self.object_to_idx:
                 one_hots[i, self.object_to_idx[obj_name]] = 1.0
-        one_hots = torch.from_numpy(one_hots)  # (N_tags, 8)
+        
+        # Expand one-hot encodings to match time dimension
+        time_steps = rfid_data_np.shape[0]
+        expanded_one_hots = np.zeros((time_steps, one_hots.shape[0], one_hots.shape[1]), dtype=np.float32)
+        for t in range(time_steps):
+            expanded_one_hots[t] = one_hots
 
-        time_steps = clean_rfid_tensor.shape[0]
-        expanded_one_hots = one_hots.unsqueeze(0).expand(time_steps, -1, -1)  # (T, N_tags, 8)
+        # Concatenate to get final RFID data with object encodings
+        clean_rfid_with_obj = np.concatenate([rfid_data_np, expanded_one_hots], axis=-1)
+        noisy_rfid_with_obj = clean_rfid_with_obj.copy()  # identical for real-world dataset
 
-        clean_rfid_with_obj = torch.cat([clean_rfid_tensor, expanded_one_hots], dim=-1)
-        noisy_rfid_with_obj = clean_rfid_with_obj  # identical
-
+        # Convert to PyTorch tensors only at the end
         return {
-            'radar_data': radar_tensor,  # (time_steps, 3, 256, 256)
-            'noisy_radar_data': noisy_radar_tensor,
-            'clean_rfid_data': clean_rfid_with_obj,
-            'noisy_rfid_data': noisy_rfid_with_obj,
+            'radar_data': torch.from_numpy(radar_data).float(),
+            'noisy_radar_data': torch.from_numpy(noisy_radar_data).float(),
+            'clean_rfid_data': torch.from_numpy(clean_rfid_with_obj).float(),
+            'noisy_rfid_data': torch.from_numpy(noisy_rfid_with_obj).float(),
             'action_label': sample['action_label'],
             'obj_label': sample['obj_label'],
             'angle': int(sample['angle']),
