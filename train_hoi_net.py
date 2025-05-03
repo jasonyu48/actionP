@@ -30,7 +30,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='HOI Recognition Training with Radar and RFID Data')
     
     # Model parameters
-    parser.add_argument('--model_type', type=str, choices=['focus', 'no_focus'], default='focus',
+    parser.add_argument('--model_type', type=str, choices=['focus', 'no_focus'], default='no_focus',
                         help='Which model architecture to use (focus or no_focus)')
     parser.add_argument('--encoder_dim', type=int, default=256, 
                         help='Dimension of encoder models')
@@ -46,9 +46,9 @@ def parse_args():
                         help='Weight of the object classification loss')
     
     # Dataset parameters
-    parser.add_argument('--data_dir', type=str, default='/scratch/tshu2/jyu197/Focus_processed_multi_angle_rfid', # '/weka/scratch/rzhao36/lwang/datasets/HOI/datasets/classic', 
+    parser.add_argument('--data_dir', type=str, default='/weka/scratch/rzhao36/lwang/datasets/HOI/datasets/classic', # '/scratch/tshu2/jyu197/Focus_processed_multi_angle_rfid'
                         help='Directory of simulation data with RFID information')
-    parser.add_argument('--real_data_dir', type=str, default='/scratch/tshu2/jyu197/Focus_processed_multi_angle_rfid_real', # '/weka/scratch/rzhao36/lwang/datasets/HOI/RealAction/datasets/classic',
+    parser.add_argument('--real_data_dir', type=str, default='/weka/scratch/rzhao36/lwang/datasets/HOI/RealAction/datasets/classic', # '/scratch/tshu2/jyu197/Focus_processed_multi_angle_rfid_real'
                         help='Directory of real-world data with RFID information')
     parser.add_argument('--use_multi_angle', action='store_true', default=True, 
                         help='Use data from all angles (0, 90, 180, 270) instead of just 90 degrees')
@@ -75,7 +75,7 @@ def parse_args():
     
     # Transfer learning parameters
     parser.add_argument('--pretrained_path', type=str, 
-                        default="/scratch/tshu2/jyu197/XRF55-repo/hoi_model_from_scratch_classic_data/best.pth.tar",
+                        default="/scratch/tshu2/jyu197/XRF55-repo/hoi_model_pretrained_classic_data/best.pth.tar",
                         help='Path to pretrained model for transfer learning')
     parser.add_argument('--finetune', action='store_true', default=True,
                         help='Use pretrained model and finetune on real/mixed data')
@@ -93,7 +93,7 @@ def parse_args():
                         help='Number of workers for data loading')
     
     # Hardware and execution parameters
-    parser.add_argument('--checkpoint_dir', type=str, default='./hoi_model_mixed_finetune_fix_encoder_classic_data', 
+    parser.add_argument('--checkpoint_dir', type=str, default='./hoi_model_mixed_finetune_classic_data_freeze_encoder', 
                         help='Directory to save checkpoints')
     parser.add_argument('--use_bf16', action='store_true', default=True, 
                         help='Use bfloat16 precision if available')

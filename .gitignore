@@ -16,8 +16,6 @@ focus_processed_model_singleangle
 focus_processed_model_multiangle
 lw_focus_model_singleangle
 lw_focus_model_multiangle
-lw_model
-lw_model_multi_angle
 
 Focus_processed_multi_angle
 xrf555_processed_multi_angle
@@ -26,3 +24,4 @@ cubelearn_model*
 hoi_model*
 transformer_model_multi_angle*
 transformer_model_single*
+lw_model*

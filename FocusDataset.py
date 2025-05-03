@@ -279,24 +279,47 @@ class FocusOriginalDataset(Dataset):
 
 class LWDataset(Dataset):
     """Dataset class for loading data from the LW format dataset (Lihao's original dataset)"""
-    def __init__(self, base_dir='/weka/scratch/rzhao36/lwang/datasets/HOI/datasets/classic', split='train', use_multi_angle=True):
+    def __init__(self, base_dir='/weka/scratch/rzhao36/lwang/datasets/HOI/datasets/classic', split='train', use_multi_angle=True,
+                 use_real_data=False, real_data_dir='/weka/scratch/rzhao36/lwang/datasets/HOI/RealAction/datasets/classic',
+                 # Split strategy parameters
+                 split_strategy='default',  # 'default', 'angle-based', 'random-subset'
+                 train_angles=None,  # for angle-based, list of angles to use for training, e.g. ['0', '90']
+                 val_angle=None,     # for angle-based, angle to use for validation, e.g. '180'
+                 samples_per_class=None,  # for random-subset, limit samples per class
+                 ):
         """
         Initialize the dataset.
         Args:
-            base_dir (str): Base directory containing the data
+            base_dir (str): Base directory containing the simulated data
             split (str): One of 'train', 'val', or 'test'
             use_multi_angle (bool): Whether to use data from all angles or just 90 degrees
+            use_real_data (bool): Whether to use real data instead of simulated data
+            real_data_dir (str): Directory containing real data (only used if use_real_data is True)
+            split_strategy (str): How to split data: 'default' (70/15/15), 'angle-based' (specific angles for train/val), 
+                                 or 'random-subset' (random n samples per class)
+            train_angles (list): For angle-based strategy, which angles to use for training (e.g. ['0', '90'])
+            val_angle (str): For angle-based strategy, which angle to use for validation (e.g. '180')
+            samples_per_class (int): For random-subset, maximum samples per action class
         """
         super().__init__()
-        self.base_dir = base_dir
+        self.base_dir = real_data_dir if use_real_data else base_dir
         self.split = split
+        self.use_real_data = use_real_data
+        self.split_strategy = split_strategy
+        self.train_angles = train_angles
+        self.val_angle = val_angle
+        self.samples_per_class = samples_per_class
         
         # Validate split parameter
         if split not in ['train', 'val', 'test']:
             raise ValueError("split must be one of 'train', 'val', or 'test'")
+            
+        # For angle-based and random-subset strategies, only train and val splits are supported
+        if split_strategy in ['angle-based', 'random-subset'] and split == 'test':
+            raise ValueError(f"The {split_strategy} strategy only supports 'train' and 'val' splits, not 'test'")
         
         # Get all action types (folders in the base directory)
-        self.action_types = [d for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
+        self.action_types = [d for d in os.listdir(self.base_dir) if os.path.isdir(os.path.join(self.base_dir, d))]
         
         # Map action types to labels (alphabetical order for consistency)
         self.action_types.sort()
@@ -304,11 +327,22 @@ class LWDataset(Dataset):
         
         # Collect all sample paths and their corresponding labels
         all_samples = []
-        # All angle folders or just 90 degrees based on the parameter
-        angle_folders = ['0', '90', '180', '270'] if use_multi_angle else ['90']
+        
+        # Determine angles to use based on split strategy
+        if split_strategy == 'angle-based' and (train_angles is not None or val_angle is not None):
+            if split == 'train' and train_angles is not None:
+                angle_folders = train_angles
+            elif split == 'val' and val_angle is not None:
+                angle_folders = [val_angle]
+            else:
+                # Default to all angles or just 90 degrees
+                angle_folders = ['0', '90', '180', '270'] if use_multi_angle else ['90']
+        else:
+            # All angle folders or just 90 degrees based on the parameter
+            angle_folders = ['0', '90', '180', '270'] if use_multi_angle else ['90']
         
         for action_type in self.action_types:
-            action_path = os.path.join(base_dir, action_type)
+            action_path = os.path.join(self.base_dir, action_type)
             
             for angle in angle_folders:
                 angle_path = os.path.join(action_path, angle)
@@ -324,74 +358,136 @@ class LWDataset(Dataset):
                     folder_path = os.path.join(angle_path, folder)
                     
                     # Look for both simulated and noisy data
-                    sim_specs_path = os.path.join(folder_path, 'specs.npy')
+                    specs_path = os.path.join(folder_path, 'specs.npy')
                     noisy_specs_path = os.path.join(folder_path, 'sim2real_specs.npy')
                     
-                    # Check if sim data exists (required)
-                    if os.path.exists(sim_specs_path):
-                        # Add noisy data path if available, else set to None
-                        noisy_path = noisy_specs_path if os.path.exists(noisy_specs_path) else None
+                    # Check if data exists
+                    if os.path.exists(specs_path):
+                        # If using real data, there will be no noisy version
+                        noisy_path = None if use_real_data else (
+                            noisy_specs_path if os.path.exists(noisy_specs_path) else None
+                        )
                         
                         all_samples.append({
-                            'sim_path': sim_specs_path,
+                            'sim_path': specs_path,
                             'noisy_path': noisy_path,
                             'label': self.action_to_label[action_type],
                             'action_type': action_type,  # Store the action type for stratified sampling
                             'angle': angle
                         })
                         
-                        # If noisy data wasn't found, log a warning
-                        if noisy_path is None:
+                        # If noisy data wasn't found for simulated data, log a warning
+                        if not use_real_data and noisy_path is None:
                             print(f"Warning: No noisy data found for {folder_path}, will use sim data as fallback")
         
-        # Use stratified sampling to ensure balanced classes in all splits
-        # Group samples by action type
-        samples_by_class = {}
-        for action_type in self.action_types:
-            samples_by_class[action_type] = [s for s in all_samples if s['action_type'] == action_type]
-            # Shuffle each class's samples for randomness
-            np.random.seed(42)  # For reproducibility
-            np.random.shuffle(samples_by_class[action_type])
+        # Apply splitting strategy
+        np.random.seed(42)  # For reproducibility
         
-        # Calculate split indices for each class (70% train, 15% val, 15% test)
-        train_samples = []
-        val_samples = []
-        test_samples = []
-        
-        for action_type, samples in samples_by_class.items():
-            n_samples = len(samples)
-            train_idx = int(n_samples * 0.7)
-            val_idx = int(n_samples * 0.85)  # 70% + 15% = 85%
+        if split_strategy == 'default':
+            # Use stratified sampling to ensure balanced classes in all splits (70/15/15)
+            # Group samples by action type
+            samples_by_class = {}
+            for action_type in self.action_types:
+                samples_by_class[action_type] = [s for s in all_samples if s['action_type'] == action_type]
+                # Shuffle each class's samples for randomness
+                np.random.shuffle(samples_by_class[action_type])
             
-            train_samples.extend(samples[:train_idx])
-            val_samples.extend(samples[train_idx:val_idx])
-            test_samples.extend(samples[val_idx:])
+            # Calculate split indices for each class (70% train, 15% val, 15% test)
+            train_samples = []
+            val_samples = []
+            test_samples = []
+            
+            for action_type, samples in samples_by_class.items():
+                n_samples = len(samples)
+                train_idx = int(n_samples * 0.7)
+                val_idx = int(n_samples * 0.85)  # 70% + 15% = 85%
+                
+                train_samples.extend(samples[:train_idx])
+                val_samples.extend(samples[train_idx:val_idx])
+                test_samples.extend(samples[val_idx:])
+            
+            # Shuffle the samples within each split for good measure
+            np.random.shuffle(train_samples)
+            np.random.shuffle(val_samples)
+            np.random.shuffle(test_samples)
+            
+            # Assign the appropriate split
+            if split == 'train':
+                self.samples = train_samples
+            elif split == 'val':
+                self.samples = val_samples
+            else:  # test
+                self.samples = test_samples
         
-        # Shuffle the samples within each split for good measure
-        np.random.seed(42)
-        np.random.shuffle(train_samples)
-        np.random.shuffle(val_samples)
-        np.random.shuffle(test_samples)
+        elif split_strategy == 'angle-based':
+            # All samples are already filtered by angle in the collection phase
+            # No additional filtering needed
+            self.samples = all_samples
+                
+        elif split_strategy == 'random-subset':
+            # Group samples by action type
+            samples_by_class = {}
+            for action_type in self.action_types:
+                samples_by_class[action_type] = [s for s in all_samples if s['action_type'] == action_type]
+                # Shuffle each class's samples for randomness
+                np.random.shuffle(samples_by_class[action_type])
+            
+            # For random-subset, only split into train and val
+            train_samples = []
+            val_samples = []
+            
+            for action_type, samples in samples_by_class.items():
+                if samples_per_class is not None and samples_per_class > 0:
+                    # Take up to samples_per_class for training
+                    train_count = min(samples_per_class, len(samples))
+                    train_samples.extend(samples[:train_count])
+                    
+                    # Remaining samples go to validation
+                    val_samples.extend(samples[train_count:])
+                else:
+                    # Default: 70% train, 30% val if no specific sample count provided
+                    n_samples = len(samples)
+                    train_idx = int(n_samples * 0.7)
+                    
+                    train_samples.extend(samples[:train_idx])
+                    val_samples.extend(samples[train_idx:])
+            
+            # Shuffle the samples within each split
+            np.random.shuffle(train_samples)
+            np.random.shuffle(val_samples)
+            
+            # Assign the appropriate split
+            if split == 'train':
+                self.samples = train_samples
+            else:  # val
+                self.samples = val_samples
         
-        # Assign the appropriate split
-        if split == 'train':
-            self.samples = train_samples
-        elif split == 'val':
-            self.samples = val_samples
-        else:  # test
-            self.samples = test_samples
+        else:
+            raise ValueError("split_strategy must be one of 'default', 'angle-based', or 'random-subset'")
         
-        # Count samples with noisy data
-        noisy_count = sum(1 for s in self.samples if s['noisy_path'] is not None)
+        # Count samples with noisy data (if not using real data)
+        noisy_count = 0 if use_real_data else sum(1 for s in self.samples if s['noisy_path'] is not None)
+        
         # Count samples from each angle
         angle_counts = {angle: sum(1 for s in self.samples if s['angle'] == angle) for angle in angle_folders}
+        
         # Count samples from each class
         class_counts = {}
         for action_type in self.action_types:
             class_counts[action_type] = sum(1 for s in self.samples if s['action_type'] == action_type)
         
-        print(f"Loaded {len(self.samples)} {split} samples from {len(self.action_types)} action types")
-        print(f"  - {noisy_count} samples have noisy data available")
+        print(f"\nLoaded {len(self.samples)} {split} samples from {len(self.action_types)} action types")
+        print(f"  - Data type: {'Real' if use_real_data else 'Simulated'}")
+        print(f"  - Split strategy: {split_strategy}")
+        if split_strategy == 'angle-based':
+            if train_angles is not None and split == 'train':
+                print(f"    - Train angles: {train_angles}")
+            if val_angle is not None and split == 'val':
+                print(f"    - Val angle: {val_angle}")
+        if split_strategy == 'random-subset' and samples_per_class is not None:
+            print(f"    - Max samples per class: {samples_per_class}")
+        if not use_real_data:
+            print(f"  - {noisy_count} samples have noisy data available")
         print(f"  - Samples per angle: {angle_counts}")
         print(f"  - Using {'all angles' if use_multi_angle else 'only 90-degree angle'}")
         print(f"  - Samples per class:")
@@ -411,8 +507,11 @@ class LWDataset(Dataset):
         # Convert simulated data to PyTorch tensors, shape: (t, 3, 256, 256)
         sim_specs = torch.from_numpy(sim_data).float()
         
-        # If noisy data is available, load it
-        if sample['noisy_path'] is not None:
+        # If using real data, use sim_specs for noisy_specs too since there's no noisy version
+        # Otherwise, if noisy data is available, load it
+        if self.use_real_data:
+            noisy_specs = sim_specs
+        elif sample['noisy_path'] is not None:
             noisy_data = np.load(sample['noisy_path'])
             noisy_specs = torch.from_numpy(noisy_data).float()
         else:
