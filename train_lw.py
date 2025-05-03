@@ -24,9 +24,8 @@ logger = logging.getLogger('LW_Focus_Training')
 
 def parse_args():
     parser = argparse.ArgumentParser(description='LW Focus Action Recognition Training')
-    parser.add_argument('--params_path', type=str, default='params.json', help='Path to parameters JSON file')
-    parser.add_argument('--data_dir', type=str, default='/weka/scratch/rzhao36/lwang/datasets/HOI/datasets/classic', help='Directory with LW data')
-    parser.add_argument('--checkpoint_dir', type=str, default='./lw_model_new', help='Directory to save checkpoints')
+
+    parser.add_argument('--checkpoint_dir', type=str, default='./lw_model_new_finetune', help='Directory to save checkpoints')
     parser.add_argument('--use_bf16', action='store_true', default=True, help='Use bfloat16 precision')
     parser.add_argument('--resume', action='store_true', default=False, help='Resume from checkpoint')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
@@ -46,10 +45,11 @@ def parse_args():
                         help='List of actions to classify')
     
     # New arguments for dataset type and split strategy
-    parser.add_argument('--dataset_type', type=str, default='simulated', choices=['simulated', 'real', 'mixed'], 
+    parser.add_argument('--dataset_type', type=str, default='mixed', choices=['simulated', 'real', 'mixed'], 
                        help='Type of dataset to use (simulated, real, or mixed)')
-    parser.add_argument('--split_strategy', type=str, default='default', choices=['default', 'angle-based', 'random-subset'],
+    parser.add_argument('--split_strategy', type=str, default='random-subset', choices=['default', 'angle-based', 'random-subset'],
                        help='Strategy for splitting data into train/val sets (for non-mixed datasets)')
+    parser.add_argument('--data_dir', type=str, default='/weka/scratch/rzhao36/lwang/datasets/HOI/datasets/classic', help='Directory with LW data')
     parser.add_argument('--real_data_dir', type=str, default='/weka/scratch/rzhao36/lwang/datasets/HOI/RealAction/datasets/classic',
                        help='Directory with real LW data')
     
@@ -60,19 +60,19 @@ def parse_args():
                        help='Angle to use for validation in angle-based split (for non-mixed datasets)')
     
     # Argument for random-subset split (used for single dataset types)
-    parser.add_argument('--samples_per_class', type=int, default=None, 
+    parser.add_argument('--samples_per_class', type=int, default=37, 
                        help='Maximum samples per class for random-subset split (for non-mixed datasets)')
     
     # Arguments for mixed dataset and finetuning
-    parser.add_argument('--finetune', action='store_true', default=False, 
+    parser.add_argument('--finetune', action='store_true', default=True, 
                        help='Finetune a model from an existing checkpoint')
-    parser.add_argument('--finetune_checkpoint', type=str, default=None, 
-                       help='Path to checkpoint for finetuning (required when --finetune is set)')
-    parser.add_argument('--mixed_sim_split', type=str, default='default', choices=['default', 'angle-based', 'random-subset'],
+    parser.add_argument('--finetune_checkpoint', type=str, default='./lw_model_new/best.pth.tar', 
+                       help='Path to load the model for finetuning (required when --finetune is set)')
+    parser.add_argument('--mixed_sim_split', type=str, default='random-subset', choices=['default', 'angle-based', 'random-subset'],
                        help='Split strategy for simulated data in mixed dataset (only used when dataset_type=mixed)')
-    parser.add_argument('--mixed_real_split', type=str, default='default', choices=['default', 'angle-based', 'random-subset'],
+    parser.add_argument('--mixed_real_split', type=str, default='random-subset', choices=['default', 'angle-based', 'random-subset'],
                        help='Split strategy for real data in mixed dataset (only used when dataset_type=mixed)')
-    parser.add_argument('--val_real_only', action='store_true', default=False,
+    parser.add_argument('--val_real_only', action='store_true', default=True,
                        help='Use only real data for validation when using mixed datasets (only used when dataset_type=mixed)')
     
     # Separate parameters for mixed datasets
@@ -80,14 +80,14 @@ def parse_args():
                        help='Angles to use for training simulated data in mixed angle-based split (only used when dataset_type=mixed)')
     parser.add_argument('--sim_val_angle', type=str, default='90', 
                        help='Angle to use for validation simulated data in mixed angle-based split (only used when dataset_type=mixed)')
-    parser.add_argument('--sim_samples_per_class', type=int, default=None, 
+    parser.add_argument('--sim_samples_per_class', type=int, default=37, 
                        help='Maximum samples per class for simulated data in mixed random-subset split (only used when dataset_type=mixed)')
     
     parser.add_argument('--real_train_angles', type=str, nargs='+', default=['0', '180', '270'], 
                        help='Angles to use for training real data in mixed angle-based split (only used when dataset_type=mixed)')
     parser.add_argument('--real_val_angle', type=str, default='90', 
                        help='Angle to use for validation real data in mixed angle-based split (only used when dataset_type=mixed)')
-    parser.add_argument('--real_samples_per_class', type=int, default=None, 
+    parser.add_argument('--real_samples_per_class', type=int, default=37, 
                        help='Maximum samples per class for real data in mixed random-subset split (only used when dataset_type=mixed)')
     
     args = parser.parse_args()
@@ -668,6 +668,120 @@ class MixedDataLoader:
         # Number of batches produced in one epoch
         return len(self.sim_loader) + len(self.real_loader)
 
+class DynamicMixedDataLoader(MixedDataLoader):
+    """Extended version of MixedDataLoader that recreates the simulated dataset
+    with a fresh random subset before each epoch (when using random-subset strategy).
+    This allows different samples to be used for each epoch during training.
+    
+    Only the simulated dataset is resampled; the real dataset remains the same.
+    """
+
+    def __init__(
+        self,
+        sim_dataset,
+        real_dataset,
+        batch_size: int,
+        shuffle: bool = True,
+        num_workers: int = 1,
+        collate_fn=None,
+        drop_last: bool = False,
+        pin_memory: bool = True,
+        # New parameters for creating new sim dataset each epoch
+        data_dir=None,
+        use_multi_angle=True,
+        split_strategy=None,
+        train_angles=None,
+        val_angle=None,
+        samples_per_class=None,
+    ):
+        # Store the original mixed dataset configuration
+        self.data_dir = data_dir
+        self.use_multi_angle = use_multi_angle
+        self.split_strategy = split_strategy
+        self.train_angles = train_angles
+        self.val_angle = val_angle
+        self.samples_per_class = samples_per_class
+        
+        # Store other dataloader parameters
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.num_workers = num_workers
+        self.collate_fn = collate_fn
+        self.drop_last = drop_last
+        self.pin_memory = pin_memory
+        
+        # Store the real dataset (never changes)
+        self.real_dataset = real_dataset
+        
+        # Only store a reference to the initial sim dataset, not used after first epoch
+        self.initial_sim_dataset = sim_dataset
+        
+        # Create the initial dataloader for real dataset
+        self.real_loader = DataLoader(
+            real_dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_workers=num_workers,
+            collate_fn=collate_fn,
+            pin_memory=pin_memory,
+            drop_last=drop_last,
+        )
+        
+        # Initialize with the first sim dataset
+        self._create_sim_loader(sim_dataset)
+    
+    def _create_sim_loader(self, sim_dataset):
+        """Create a new dataloader for the simulated dataset"""
+        self.sim_loader = DataLoader(
+            sim_dataset,
+            batch_size=self.batch_size,
+            shuffle=self.shuffle,
+            num_workers=self.num_workers,
+            collate_fn=self.collate_fn,
+            pin_memory=self.pin_memory,
+            drop_last=self.drop_last,
+        )
+        
+    def _create_new_sim_dataset(self):
+        """Create a new simulated dataset with a different random subset"""
+        # Generate a new random seed for this dataset creation
+        new_seed = int(time.time()) + random.randint(1, 10000)
+        logger.info(f"Creating new simulated dataset with different random subset using seed {new_seed}")
+        
+        # Create a new simulated dataset with the same configuration but a new seed
+        new_sim_dataset = LWDataset(
+            base_dir=self.data_dir,
+            split='train',
+            use_multi_angle=self.use_multi_angle,
+            use_real_data=False,
+            split_strategy=self.split_strategy,
+            train_angles=self.train_angles,
+            val_angle=self.val_angle,
+            samples_per_class=self.samples_per_class,
+            seed=new_seed  # Use the new random seed
+        )
+        
+        # Create a new dataloader with the new dataset
+        self._create_sim_loader(new_sim_dataset)
+        
+    def __iter__(self):
+        # Only recreate the simulated dataset if using random-subset strategy
+        if self.split_strategy == 'random-subset':
+            self._create_new_sim_dataset()
+        
+        # Fresh iterators for each epoch
+        self.sim_iter = iter(self.sim_loader)
+        self.real_iter = iter(self.real_loader)
+
+        # Build the epoch sequence of sources ("sim" / "real")
+        self.batch_sequence = ["sim"] * len(self.sim_loader) + [
+            "real"
+        ] * len(self.real_loader)
+        if self.shuffle:
+            random.shuffle(self.batch_sequence)
+        self._seq_idx = 0
+        return self
+
 def main():
     # Parse command line arguments
     args = parse_args()
@@ -711,6 +825,8 @@ def main():
         
         # Create simulated dataset with specified split strategy
         logger.info(f"Simulated dataset using split strategy: {args.mixed_sim_split}")
+        
+        # Create initial simulated dataset with command line seed
         sim_train_dataset = LWDataset(
             base_dir=args.data_dir,
             split='train',
@@ -719,7 +835,8 @@ def main():
             split_strategy=args.mixed_sim_split,
             train_angles=args.sim_train_angles,
             val_angle=args.sim_val_angle,
-            samples_per_class=args.sim_samples_per_class
+            samples_per_class=args.sim_samples_per_class,
+            seed=args.seed  # Use the command line seed for initial dataset
         )
         
         # Only create simulated validation dataset if we're not using real-only validation
@@ -761,16 +878,38 @@ def main():
             samples_per_class=args.real_samples_per_class
         )
         
-        # Use MixedDataLoader for training
-        train_dataloader = MixedDataLoader(
-            sim_dataset=sim_train_dataset,
-            real_dataset=real_train_dataset,
-            batch_size=args.batch_size,
-            shuffle=True,
-            num_workers=args.num_workers,
-            collate_fn=lw_collate_fn,
-            pin_memory=True
-        )
+        # Choose the appropriate dataloader based on whether we want dynamic resampling
+        if args.mixed_sim_split == 'random-subset':
+            # Use DynamicMixedDataLoader for training to resample simulated data each epoch
+            logger.info("Using dynamic resampling for simulated data in each epoch")
+            train_dataloader = DynamicMixedDataLoader(
+                sim_dataset=sim_train_dataset,
+                real_dataset=real_train_dataset,
+                batch_size=args.batch_size,
+                shuffle=True,
+                num_workers=args.num_workers,
+                collate_fn=lw_collate_fn,
+                pin_memory=True,
+                # Additional parameters for creating new sim dataset each epoch
+                data_dir=args.data_dir,
+                use_multi_angle=args.use_multi_angle,
+                split_strategy=args.mixed_sim_split,
+                train_angles=args.sim_train_angles,
+                val_angle=args.sim_val_angle,
+                samples_per_class=args.sim_samples_per_class
+            )
+        else:
+            # Use standard MixedDataLoader for training
+            logger.info("Using standard fixed datasets for training")
+            train_dataloader = MixedDataLoader(
+                sim_dataset=sim_train_dataset,
+                real_dataset=real_train_dataset,
+                batch_size=args.batch_size,
+                shuffle=True,
+                num_workers=args.num_workers,
+                collate_fn=lw_collate_fn,
+                pin_memory=True
+            )
         
         # For validation, we can either use mixed data (both sim and real) or only real data
         if args.val_real_only:
@@ -786,6 +925,7 @@ def main():
             )
         else:
             # Use MixedDataLoader for validation with both sim and real data
+            # Note: We don't use dynamic sampling for validation to keep it consistent
             val_dataloader = MixedDataLoader(
                 sim_dataset=sim_val_dataset,
                 real_dataset=real_val_dataset,
@@ -875,8 +1015,8 @@ def main():
     logger.info(f"Model size: {model_utils.getModelSize(model)[-1]:.2f} MB")
     
     # Create optimizer and scheduler
-    optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=5e-4)
-    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[40], gamma=0.5)
+    optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=1e-3)
+    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[15, 30, 45], gamma=0.5)
     
     # Record training configuration
     if not os.path.exists(args.checkpoint_dir):

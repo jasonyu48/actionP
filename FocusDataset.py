@@ -286,6 +286,7 @@ class LWDataset(Dataset):
                  train_angles=None,  # for angle-based, list of angles to use for training, e.g. ['0', '90']
                  val_angle=None,     # for angle-based, angle to use for validation, e.g. '180'
                  samples_per_class=None,  # for random-subset, limit samples per class
+                 seed=42,  # Added seed parameter with default value 42 for backwards compatibility
                  ):
         """
         Initialize the dataset.
@@ -300,6 +301,7 @@ class LWDataset(Dataset):
             train_angles (list): For angle-based strategy, which angles to use for training (e.g. ['0', '90'])
             val_angle (str): For angle-based strategy, which angle to use for validation (e.g. '180')
             samples_per_class (int): For random-subset, maximum samples per action class
+            seed (int): Random seed for reproducibility (default: 42)
         """
         super().__init__()
         self.base_dir = real_data_dir if use_real_data else base_dir
@@ -309,6 +311,7 @@ class LWDataset(Dataset):
         self.train_angles = train_angles
         self.val_angle = val_angle
         self.samples_per_class = samples_per_class
+        self.seed = seed
         
         # Validate split parameter
         if split not in ['train', 'val', 'test']:
@@ -381,7 +384,7 @@ class LWDataset(Dataset):
                             print(f"Warning: No noisy data found for {folder_path}, will use sim data as fallback")
         
         # Apply splitting strategy
-        np.random.seed(42)  # For reproducibility
+        np.random.seed(self.seed)  # For reproducibility
         
         if split_strategy == 'default':
             # Use stratified sampling to ensure balanced classes in all splits (70/15/15)
