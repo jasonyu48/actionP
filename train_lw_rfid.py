@@ -25,18 +25,18 @@ logger = logging.getLogger('LW_Focus_Training')
 def parse_args():
     parser = argparse.ArgumentParser(description='LW Focus Action Recognition Training')
 
-    parser.add_argument('--checkpoint_dir', type=str, default='./lw_model_finetune_lw_p_wo_wd', help='Directory to save checkpoints')
+    parser.add_argument('--checkpoint_dir', type=str, default='./lw_model_rfid_from_scratch', help='Directory to save checkpoints')
     parser.add_argument('--use_bf16', action='store_true', default=True, help='Use bfloat16 precision')
     parser.add_argument('--resume', action='store_true', default=False, help='Resume from checkpoint')
-    parser.add_argument('--seed', type=int, default=41, help='Random seed for reproducibility')
+    parser.add_argument('--seed', type=int, default=2025, help='Random seed for reproducibility')
     parser.add_argument('--hyp_search', action='store_true', default=False, help='Perform hyperparameter search before training')
     parser.add_argument('--use_noisy', action='store_true', default=True, help='Use noisy data when available (applies to simulated data only)')
     parser.add_argument('--use_multi_angle', action='store_true', default=True, help='Use data from all angles (0, 90, 180, 270) instead of just 90 degrees')
     
     parser.add_argument('--num_channels', type=int, default=16, help='Number of channels for the model')
-    parser.add_argument('--learning_rate', type=float, default=1e-6, help='Learning rate for optimizer')
+    parser.add_argument('--learning_rate', type=float, default=1e-5, help='Learning rate for optimizer')
     parser.add_argument('--batch_size', type=int, default=16, help='Batch size for training and evaluation')
-    parser.add_argument('--num_epochs', type=int, default=100, help='Number of training epochs')
+    parser.add_argument('--num_epochs', type=int, default=80, help='Number of training epochs')
     parser.add_argument('--num_workers', type=int, default=1, help='Number of workers for data loading')
     parser.add_argument('--dropout_rate', type=float, default=0.2, help='Dropout rate for model')
     parser.add_argument('--cuda', action='store_true', default=True, help='Use CUDA if available')
@@ -44,13 +44,13 @@ def parse_args():
                         help='List of actions to classify')
     
     # New arguments for dataset type and split strategy
-    parser.add_argument('--dataset_type', type=str, default='mixed', choices=['simulated', 'real', 'mixed'], 
+    parser.add_argument('--dataset_type', type=str, default='real', choices=['simulated', 'real', 'mixed'], 
                        help='Type of dataset to use (simulated, real, or mixed)')
     parser.add_argument('--split_strategy', type=str, default='random-subset', choices=['default', 'angle-based', 'random-subset'],
                        help='Strategy for splitting data into train/val sets (for non-mixed datasets)')
-    parser.add_argument('--data_dir', type=str, default='/weka/scratch/rzhao36/lwang/datasets/HOI/datasets/classic', help='Directory with LW data')
+    parser.add_argument('--data_dir', type=str, default='/weka/scratch/rzhao36/lwang/datasets/HOI/datasets/classic', help='Directory with simulated data')
     parser.add_argument('--real_data_dir', type=str, default='/weka/scratch/rzhao36/lwang/datasets/HOI/RealAction/datasets/classic',
-                       help='Directory with real LW data')
+                       help='Directory with real data')
     
     parser.add_argument('--train_angles', type=str, nargs='+', default=['0', '180', '270'], 
                        help='Angles to use for training in angle-based split (for non-mixed datasets)')
@@ -60,7 +60,7 @@ def parse_args():
                        help='Maximum samples per class for random-subset split (for non-mixed datasets)')
     
     # Arguments for finetuning
-    parser.add_argument('--finetune', action='store_true', default=True, 
+    parser.add_argument('--finetune', action='store_true', default=False, 
                        help='Finetune a model from an existing checkpoint')
     parser.add_argument('--finetune_checkpoint', type=str, default='./lw_model_pretrain_lw/best.pth.tar', 
                        help='Path to load the model for finetuning (required when --finetune is set)')
@@ -88,6 +88,18 @@ def parse_args():
                        help='Use only real data for validation when using mixed datasets (only used when dataset_type=mixed)')
     parser.add_argument('--resample_sim_data', action='store_true', default=False,
                        help='Resample simulated data across different epochs when using mixed dataset with random-subset strategy')
+    
+    # HOINet specific parameters
+    parser.add_argument('--input_dim', type=int, default=256, 
+                       help='Input dimension for the HOINet model')
+    parser.add_argument('--obj_num', type=int, default=6, 
+                       help='Number of objects for the HOINet model')
+    parser.add_argument('--obj_dim', type=int, default=4, 
+                       help='Object dimension for the HOINet model')
+    parser.add_argument('--obj_branch_size', type=int, default=128, 
+                       help='Object branch size for the HOINet model')
+    parser.add_argument('--loss_coef', type=float, default=0.5, 
+                       help='Weight coefficient for object classification loss')
     
     args = parser.parse_args()
     
@@ -322,6 +334,9 @@ def hyperparameter_search(train_dataset, val_dataset, device, args):
 def train_and_evaluate(model, train_dataloader, val_dataloader, optimizer, scheduler, args):
     """Train the model and evaluate on validation set"""
     
+    # Import loss function from net_model_lw_with_rfid
+    from model.net_model_lw_with_rfid import loss_fn, classifer_metrics
+    
     # Determine data type message
     if args.dataset_type == 'mixed':
         data_type = "mixed (simulated + real)"
@@ -398,8 +413,10 @@ def train_and_evaluate(model, train_dataloader, val_dataloader, optimizer, sched
         # Track metrics
         epoch_loss = 0
         epoch_samples = 0
-        all_preds = []
-        all_labels = []
+        all_action_preds = []
+        all_action_labels = []
+        all_obj_preds = []
+        all_obj_labels = []
         
         # Use tqdm for progress bar
         with tqdm(total=len(train_dataloader), desc=f"Epoch {epoch+1}/{args.num_epochs} [Train]") as pbar:
@@ -413,25 +430,36 @@ def train_and_evaluate(model, train_dataloader, val_dataloader, optimizer, sched
                 else:
                     batch = batch_data  # batch_data is just the batch
                 
-                # Move data to device based on data type selected
+                # Prepare mmWave data for model
                 if args.use_noisy:
                     specs = batch['noisy_specs'].to(device)
                 else:
                     specs = batch['sim_specs'].to(device)
                 
                 padding_mask = batch['padding_mask'].to(device)
-                labels = batch['labels'].to(device)
+                action_labels = batch['labels'].to(device)
+                
+                # Prepare RFID data for model
+                obj = batch['obj'].to(device)
+                obj_mask = batch['obj_mask'].to(device)
+                obj_name = batch['obj_name'].to(device)
+                obj_labels = batch['obj_labels'].to(device)
+                
+                # Organize data for HOINet format
+                mm_data_list = [specs, padding_mask]
+                rfid_data_list = [obj, obj_mask, obj_name]
                 
                 # Convert to bfloat16 if using mixed precision
                 if args.use_bf16 and torch.cuda.get_device_capability()[0] >= 8:
                     with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
-                        # Forward pass
-                        output = model(specs, padding_mask)
-                        batch_loss = loss_fn(output, labels)
+                        # Forward pass for HOINet
+                        action_output, obj_output = model(mm_data_list, rfid_data_list)
+                        # Use the loss function from HOINet
+                        batch_loss = loss_fn(action_output, action_labels, obj_output, obj_labels, args)
                 else:
                     # Forward pass (standard precision)
-                    output = model(specs, padding_mask)
-                    batch_loss = loss_fn(output, labels)
+                    action_output, obj_output = model(mm_data_list, rfid_data_list)
+                    batch_loss = loss_fn(action_output, action_labels, obj_output, obj_labels, args)
                 
                 # Backward pass and optimization
                 optimizer.zero_grad()
@@ -439,13 +467,16 @@ def train_and_evaluate(model, train_dataloader, val_dataloader, optimizer, sched
                 optimizer.step()
                 
                 # Update metrics
-                epoch_loss += batch_loss.item() * labels.size(0)
-                epoch_samples += labels.size(0)
+                epoch_loss += batch_loss.item() * action_labels.size(0)
+                epoch_samples += action_labels.size(0)
                 
                 # Track predictions
-                _, preds = torch.max(output, 1)
-                all_preds.extend(preds.cpu().numpy())
-                all_labels.extend(labels.cpu().numpy())
+                _, action_preds = torch.max(action_output, 1)
+                _, obj_preds = torch.max(obj_output, 1)
+                all_action_preds.extend(action_preds.cpu().numpy())
+                all_action_labels.extend(action_labels.cpu().numpy())
+                all_obj_preds.extend(obj_preds.cpu().numpy())
+                all_obj_labels.extend(obj_labels.cpu().numpy())
                 
                 # Update progress bar
                 pbar.update(1)
@@ -453,7 +484,8 @@ def train_and_evaluate(model, train_dataloader, val_dataloader, optimizer, sched
         
         # Calculate epoch metrics
         train_loss = epoch_loss / epoch_samples
-        train_acc = np.mean(np.array(all_preds) == np.array(all_labels))
+        action_acc = np.mean(np.array(all_action_preds) == np.array(all_action_labels))
+        obj_acc = np.mean(np.array(all_obj_preds) == np.array(all_obj_labels))
         
         # Evaluate on validation set
         val_loss, val_metrics = evaluate(model, val_dataloader, device, args)
@@ -464,20 +496,20 @@ def train_and_evaluate(model, train_dataloader, val_dataloader, optimizer, sched
         
         # Log metrics
         logger.info(f"Epoch {epoch+1}/{args.num_epochs} - "
-                   f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, "
-                   f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
+                   f"Train Loss: {train_loss:.4f}, Train Action Acc: {action_acc:.4f}, Train Obj Acc: {obj_acc:.4f}, "
+                   f"Val Loss: {val_loss:.4f}, Val Action Acc: {val_acc:.4f}, Val Obj Acc: {val_metrics['Object Accuracy']:.4f}")
         
         # Store history
         train_losses.append(train_loss)
         val_losses.append(val_loss)
-        train_accs.append(train_acc)
+        train_accs.append(action_acc)  # We use action accuracy as the primary metric
         val_accs.append(val_acc)
         
         # Save checkpoint
         is_best = val_acc > best_val_acc
         if is_best:
             best_val_acc = val_acc
-            best_train_acc = train_acc
+            best_train_acc = action_acc
             best_epoch = epoch + 1
             
         # Checkpoint state
@@ -503,7 +535,7 @@ def train_and_evaluate(model, train_dataloader, val_dataloader, optimizer, sched
     
     # Save best accuracy information
     best_metrics = {
-        'best_val_acc': best_val_acc,
+        'best_val_acc': best_val_acc, # action accuracy
         'best_train_acc': best_train_acc,
         'best_epoch': best_epoch,
         'dataset_type': args.dataset_type,
@@ -522,10 +554,15 @@ def evaluate(model, dataloader, device, args):
     """Evaluate the model on the given dataloader"""
     model.eval()
     
+    # Import evaluation metrics
+    from model.net_model_lw_with_rfid import loss_fn, classifer_metrics
+    
     total_loss = 0
     total_samples = 0
-    all_outputs = []
-    all_labels = []
+    all_action_outputs = []
+    all_action_labels = []
+    all_obj_outputs = []
+    all_obj_labels = []
     
     with torch.no_grad():
         with tqdm(total=len(dataloader), desc="Evaluation") as pbar:
@@ -536,38 +573,53 @@ def evaluate(model, dataloader, device, args):
                 else:
                     batch = batch_data
                 
-                # Move data to device based on data type selected
+                # Prepare mmWave data for model
                 if args.use_noisy:
                     specs = batch['noisy_specs'].to(device)
                 else:
                     specs = batch['sim_specs'].to(device)
                 
                 padding_mask = batch['padding_mask'].to(device)
-                labels = batch['labels'].to(device)
+                action_labels = batch['labels'].to(device)
+                
+                # Prepare RFID data for model
+                obj = batch['obj'].to(device)
+                obj_mask = batch['obj_mask'].to(device)
+                obj_name = batch['obj_name'].to(device)
+                obj_labels = batch['obj_labels'].to(device)
+                
+                # Organize data for HOINet format
+                mm_data_list = [specs, padding_mask]
+                rfid_data_list = [obj, obj_mask, obj_name]
                 
                 # Forward pass with bfloat16 if specified
                 if args.use_bf16 and torch.cuda.get_device_capability()[0] >= 8:
                     with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
-                        output = model(specs, padding_mask)
-                        batch_loss = loss_fn(output, labels)
+                        action_output, obj_output = model(mm_data_list, rfid_data_list)
+                        batch_loss = loss_fn(action_output, action_labels, obj_output, obj_labels, args)
                 else:
-                    output = model(specs, padding_mask)
-                    batch_loss = loss_fn(output, labels)
+                    action_output, obj_output = model(mm_data_list, rfid_data_list)
+                    batch_loss = loss_fn(action_output, action_labels, obj_output, obj_labels, args)
                 
                 # Update metrics
-                total_loss += batch_loss.item() * labels.size(0)
-                total_samples += labels.size(0)
+                total_loss += batch_loss.item() * action_labels.size(0)
+                total_samples += action_labels.size(0)
                 
                 # Track outputs for metrics
-                all_outputs.append(output)
-                all_labels.append(labels)
+                all_action_outputs.append(action_output)
+                all_action_labels.append(action_labels)
+                all_obj_outputs.append(obj_output)
+                all_obj_labels.append(obj_labels)
                 
                 pbar.update(1)
     
     # Calculate metrics
-    all_outputs = torch.cat(all_outputs, dim=0)
-    all_labels = torch.cat(all_labels, dim=0)
-    metrics = classifer_metrics(all_outputs, all_labels)
+    all_action_outputs = torch.cat(all_action_outputs, dim=0)
+    all_action_labels = torch.cat(all_action_labels, dim=0)
+    all_obj_outputs = torch.cat(all_obj_outputs, dim=0)
+    all_obj_labels = torch.cat(all_obj_labels, dim=0)
+    
+    metrics = classifer_metrics(all_action_outputs, all_action_labels, all_obj_outputs, all_obj_labels)
     
     avg_loss = total_loss / total_samples
     
@@ -812,221 +864,31 @@ def main():
     save_args_to_json(args, args_json_path)
     logger.info(f"Saved arguments to {args_json_path}")
     
+    # Note: HOINet parameters are now set via command line arguments in parse_args()
+    
     # Log dataset configuration
     logger.info(f"Dataset type: {args.dataset_type}")
-    
-    if args.dataset_type == 'mixed':
-        logger.info(f"Mixed dataset configuration:")
-        logger.info(f"  Simulated data split strategy: {args.mixed_sim_split}")
-        logger.info(f"  Real data split strategy: {args.mixed_real_split}")
-        logger.info(f"  Validate on real data only: {args.val_real_only}")
-        if args.mixed_sim_split == 'random-subset':
-            logger.info(f"  Resample simulated data each epoch: {args.resample_sim_data}")
-    
-    if args.use_noisy and args.dataset_type != 'real':
-        logger.info("Using noisy data when available")
-    
-    if args.use_multi_angle:
-        logger.info("Using data from all angles (0, 90, 180, 270)")
-    else:
-        logger.info("Using data from only 90-degree angle")
+
+    # Import HOINet model instead of ActionNet
+    from model.net_model_lw_with_rfid import HOINet, loss_fn, classifer_metrics
+
+    # Import the modified dataloader
+    from new_data_loader import fetch_dataloader, lw_collate_fn, MixedDataLoader
     
     # Create datasets based on configuration
     if args.dataset_type == 'mixed':
-        # Create both simulated and real datasets for mixing
-        logger.info("Creating mixed dataset with simulated and real data")
-        
-        # Create simulated dataset with specified split strategy
-        logger.info(f"Simulated dataset using split strategy: {args.mixed_sim_split}")
-        
-        # Create initial simulated dataset with command line seed
-        sim_train_dataset = LWDataset(
-            base_dir=args.data_dir,
-            split='train',
-            use_multi_angle=args.use_multi_angle,
-            use_real_data=False,
-            split_strategy=args.mixed_sim_split,
-            train_angles=args.sim_train_angles,
-            val_angle=args.sim_val_angle,
-            samples_per_class=args.sim_samples_per_class,
-            seed=args.seed  # Use the command line seed for initial dataset
-        )
-        
-        # Only create simulated validation dataset if we're not using real-only validation
-        if not args.val_real_only:
-            sim_val_dataset = LWDataset(
-                base_dir=args.data_dir,
-                split='val',
-                use_multi_angle=args.use_multi_angle,
-                use_real_data=False,
-                split_strategy=args.mixed_sim_split,
-                train_angles=args.sim_train_angles,
-                val_angle=args.sim_val_angle,
-                samples_per_class=args.sim_samples_per_class
-            )
-        
-        # Create real dataset with specified split strategy
-        logger.info(f"Real dataset using split strategy: {args.mixed_real_split}")
-        real_train_dataset = LWDataset(
-            base_dir=args.data_dir,
-            split='train',
-            use_multi_angle=args.use_multi_angle,
-            use_real_data=True,
-            real_data_dir=args.real_data_dir,
-            split_strategy=args.mixed_real_split,
-            train_angles=args.real_train_angles,
-            val_angle=args.real_val_angle,
-            samples_per_class=args.real_samples_per_class
-        )
-        
-        real_val_dataset = LWDataset(
-            base_dir=args.data_dir,
-            split='val',
-            use_multi_angle=args.use_multi_angle,
-            use_real_data=True,
-            real_data_dir=args.real_data_dir,
-            split_strategy=args.mixed_real_split,
-            train_angles=args.real_train_angles,
-            val_angle=args.real_val_angle,
-            samples_per_class=args.real_samples_per_class
-        )
-        
-        # Choose the appropriate dataloader based on whether we want dynamic resampling
-        if args.mixed_sim_split == 'random-subset':
-            # Use DynamicMixedDataLoader for training to resample simulated data each epoch
-            logger.info("Using dynamic resampling for simulated data in each epoch")
-            train_dataloader = DynamicMixedDataLoader(
-                sim_dataset=sim_train_dataset,
-                real_dataset=real_train_dataset,
-                batch_size=args.batch_size,
-                shuffle=True,
-                num_workers=args.num_workers,
-                collate_fn=lw_collate_fn,
-                pin_memory=True,
-                # Additional parameters for creating new sim dataset each epoch
-                data_dir=args.data_dir,
-                use_multi_angle=args.use_multi_angle,
-                split_strategy=args.mixed_sim_split,
-                train_angles=args.sim_train_angles,
-                val_angle=args.sim_val_angle,
-                samples_per_class=args.sim_samples_per_class,
-                resample_sim_data=args.resample_sim_data
-            )
-            if args.resample_sim_data:
-                logger.info("Simulated data will be resampled for each epoch")
-            else:
-                logger.info("Simulated data will remain fixed across epochs")
-        else:
-            # Use standard MixedDataLoader for training
-            logger.info("Using standard fixed datasets for training")
-            train_dataloader = MixedDataLoader(
-                sim_dataset=sim_train_dataset,
-                real_dataset=real_train_dataset,
-                batch_size=args.batch_size,
-                shuffle=True,
-                num_workers=args.num_workers,
-                collate_fn=lw_collate_fn,
-                pin_memory=True
-            )
-        
-        # For validation, we can either use mixed data (both sim and real) or only real data
-        if args.val_real_only:
-            logger.info("Using ONLY real data for validation")
-            # Just use the real validation dataset with a standard DataLoader
-            val_dataloader = DataLoader(
-                real_val_dataset,
-                batch_size=args.batch_size,
-                shuffle=False,
-                num_workers=args.num_workers,
-                collate_fn=lw_collate_fn,
-                pin_memory=True
-            )
-        else:
-            # Use MixedDataLoader for validation with both sim and real data
-            # Note: We don't use dynamic sampling for validation to keep it consistent
-            val_dataloader = MixedDataLoader(
-                sim_dataset=sim_val_dataset,
-                real_dataset=real_val_dataset,
-                batch_size=args.batch_size,
-                shuffle=False,
-                num_workers=args.num_workers,
-                collate_fn=lw_collate_fn,
-                pin_memory=True
-            )
-        
-        if args.val_real_only:
-            logger.info(f"Created mixed training dataloader with {len(train_dataloader)} batches and real-only validation dataloader with {len(val_dataloader)} batches")
-        else:
-            logger.info(f"Created mixed dataloader with {len(train_dataloader)} training batches and {len(val_dataloader)} validation batches")
-        
+        # Create dataloaders with the modified fetch_dataloader
+        dataloaders = fetch_dataloader(['train', 'val'], args.real_data_dir, args.data_dir, args)
+        train_dataloader = dataloaders['train']
+        val_dataloader = dataloaders['val']
     else:
-        # Single dataset type (either simulated or real)
-        use_real_data = (args.dataset_type == 'real')
-        
-        if use_real_data:
-            logger.info(f"Using real data from {args.real_data_dir}")
-        else:
-            logger.info(f"Using simulated data from {args.data_dir}")
-        
-        # Create train dataset
-        train_dataset = LWDataset(
-            base_dir=args.data_dir,
-            split='train',
-            use_multi_angle=args.use_multi_angle,
-            use_real_data=use_real_data,
-            real_data_dir=args.real_data_dir,
-            split_strategy=args.split_strategy,
-            train_angles=args.train_angles,
-            val_angle=args.val_angle,
-            samples_per_class=args.samples_per_class
-        )
-        
-        # Create validation dataset
-        val_dataset = LWDataset(
-            base_dir=args.data_dir,
-            split='val',
-            use_multi_angle=args.use_multi_angle,
-            use_real_data=use_real_data,
-            real_data_dir=args.real_data_dir,
-            split_strategy=args.split_strategy,
-            train_angles=args.train_angles,
-            val_angle=args.val_angle,
-            samples_per_class=args.samples_per_class
-        )
-        
-        # Perform hyperparameter search if specified
-        if args.hyp_search:
-            logger.info("Starting hyperparameter search")
-            best_lr, best_batch_size = hyperparameter_search(train_dataset, val_dataset, device, args)
-            
-            # Update arguments with best values
-            args.learning_rate = best_lr
-            args.batch_size = best_batch_size
-            logger.info(f"Using best hyperparameters: LR={best_lr}, BS={best_batch_size}")
-        else:
-            logger.info(f"Using default hyperparameters: LR={args.learning_rate}, BS={args.batch_size}")
-        
-        # Create standard dataloaders
-        train_dataloader = DataLoader(
-            train_dataset, 
-            batch_size=args.batch_size, 
-            shuffle=True,
-            num_workers=args.num_workers,
-            collate_fn=lw_collate_fn,
-            pin_memory=True
-        )
-        
-        val_dataloader = DataLoader(
-            val_dataset, 
-            batch_size=args.batch_size,
-            shuffle=False,
-            num_workers=args.num_workers,
-            collate_fn=lw_collate_fn,
-            pin_memory=True
-        )
+        # Use the dataloader directly from new_data_loader
+        dataloaders = fetch_dataloader(['train', 'val'], args.real_data_dir, args.data_dir, args)
+        train_dataloader = dataloaders['train']
+        val_dataloader = dataloaders['val']
     
-    # Create model
-    model = ActionNet(args)
+    # Create HOINet model instead of ActionNet
+    model = HOINet(args)
     model = model.to(device)
     
     # Print model summary

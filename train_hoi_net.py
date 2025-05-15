@@ -42,7 +42,7 @@ def parse_args():
                         help='Number of antennas in radar data (only used for focus model)')
     parser.add_argument('--dropout_rate', type=float, default=0.2, 
                         help='Dropout rate for all models')
-    parser.add_argument('--loss_coef', type=float, default=0.3,
+    parser.add_argument('--loss_coef', type=float, default=0.5,
                         help='Weight of the object classification loss')
     
     # Dataset parameters
@@ -56,7 +56,7 @@ def parse_args():
                         help='Use noisy data for training instead of simulated data')
     
     # Dataset selection and splitting strategy
-    parser.add_argument('--dataset_type', type=str, choices=['sim', 'real', 'mixed'], default='mixed',
+    parser.add_argument('--dataset_type', type=str, choices=['sim', 'real', 'mixed'], default='real',
                         help='Type of dataset to use: simulated, real-world, or mixed')
     parser.add_argument('--split_strategy', type=str, choices=['default', 'angle-based', 'random-subset'], default='random-subset',
                         help='Strategy for splitting data (default: 70/15/15 random split)')
@@ -64,42 +64,42 @@ def parse_args():
                         help='Angles to use for training with angle-based splitting (e.g., 0 90)')
     parser.add_argument('--val_angle', type=str, default=None,
                         help='Angle to use for validation with angle-based splitting (e.g., 180)')
-    parser.add_argument('--samples_per_class', type=int, default=150,
+    parser.add_argument('--samples_per_class', type=int, default=27,
                         help='Maximum samples per class for angle-based or random-subset splitting')
     parser.add_argument('--real_split_strategy', type=str, choices=['default', 'angle-based', 'random-subset'], default='random-subset',
                         help='Strategy for splitting real data')
     parser.add_argument('--real_val_angle', type=str, default=None,
                         help='Angle to use for real validation data with angle-based splitting')
-    parser.add_argument('--real_samples_per_class', type=int, default=37,
+    parser.add_argument('--real_samples_per_class', type=int, default=27,
                         help='Maximum real samples per class for training')
     
     # Transfer learning parameters
     parser.add_argument('--pretrained_path', type=str, 
                         default="/scratch/tshu2/jyu197/XRF55-repo/hoi_model_pretrained_classic_data/best.pth.tar",
                         help='Path to pretrained model for transfer learning')
-    parser.add_argument('--finetune', action='store_true', default=True,
+    parser.add_argument('--finetune', action='store_true', default=False,
                         help='Use pretrained model and finetune on real/mixed data')
-    parser.add_argument('--freeze_encoder', action='store_true', default=True,
+    parser.add_argument('--freeze_encoder', action='store_true', default=False,
                         help='Freeze encoder layers during finetuning (only train the classifier head)')
     
     # Training parameters
     parser.add_argument('--learning_rate', type=float, default=1e-5, 
                         help='Learning rate for optimizer')
-    parser.add_argument('--batch_size', type=int, default=32, 
+    parser.add_argument('--batch_size', type=int, default=16, 
                         help='Batch size for training and validation')
-    parser.add_argument('--num_epochs', type=int, default=60, 
+    parser.add_argument('--num_epochs', type=int, default=100, 
                         help='Number of training epochs')
     parser.add_argument('--num_workers', type=int, default=1, 
                         help='Number of workers for data loading')
     
     # Hardware and execution parameters
-    parser.add_argument('--checkpoint_dir', type=str, default='./hoi_model_mixed_finetune_classic_data_freeze_encoder', 
+    parser.add_argument('--checkpoint_dir', type=str, default='./hoi_model_from_scratch_lw_less_real', 
                         help='Directory to save checkpoints')
     parser.add_argument('--use_bf16', action='store_true', default=True, 
                         help='Use bfloat16 precision if available')
     parser.add_argument('--resume', action='store_true', default=False, 
                         help='Resume from checkpoint')
-    parser.add_argument('--seed', type=int, default=42, 
+    parser.add_argument('--seed', type=int, default=39, 
                         help='Random seed for reproducibility')
     parser.add_argument('--hyp_search', action='store_true', default=False, 
                         help='Perform hyperparameter search before training')
@@ -1029,8 +1029,8 @@ def main():
     logger.info(f"Model size: {model_size[-1]:.2f} MB")
     
     # Create optimizer and scheduler
-    optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=1e-3)
-    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[30, 45], gamma=0.1)
+    optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate)
+    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[70], gamma=0.1)
     
     # Record training configuration
     if not os.path.exists(args.checkpoint_dir):

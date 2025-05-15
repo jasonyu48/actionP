@@ -42,7 +42,7 @@ def parse_args():
     # Training parameters
     parser.add_argument('--learning_rate', type=float, default=1e-4, 
                         help='Learning rate for optimizer')
-    parser.add_argument('--batch_size', type=int, default=32, 
+    parser.add_argument('--batch_size', type=int, default=16, 
                         help='Batch size for training and validation')
     parser.add_argument('--num_epochs', type=int, default=60, 
                         help='Number of training epochs')
@@ -567,8 +567,8 @@ def main():
     logger.info(f"Model size: {model_size[-1]:.2f} MB")
     
     # Create optimizer and scheduler
-    optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=1e-3)
-    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[40], gamma=0.5)
+    optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate)
+    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[70], gamma=0.1)
     
     # Record training configuration
     if not os.path.exists(args.checkpoint_dir):

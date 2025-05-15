@@ -241,7 +241,7 @@ class HOINet(nn.Module):
         obj_output = self.OBJBranch(rfid_data_list)  # (m,n,6,3) -> (m,1024)
         
         fuse_output = torch.cat((mmWave_output,obj_output),dim=-1)  # (m,1024) + (m,1024) -> (m,2048)
-        # fuse_output = mmWave_output + obj_output # (m,1024) + (m,1024) -> (m,1024)
+        #fuse_output =  obj_output # (m,1024) + (m,1024) -> (m,1024)
 
 
         # action_output = self.action_classifier(obj_output)  # (m,64) -> (m,64)
@@ -268,10 +268,9 @@ def classifer_metrics(action_logits, action_label,obj_logits, obj_label):
     """
     action_pred = torch.argmax(action_logits, dim=1).cpu().detach().numpy()
     action_label = action_label.cpu().detach().numpy()
-    
+    #print("action pred",action_pred,action_label)
     obj_pred = torch.argmax(obj_logits, dim=1).cpu().detach().numpy()
     obj_label = obj_label.cpu().detach().numpy()
-    
     from sklearn.metrics import f1_score,accuracy_score
     action_acc = accuracy_score(action_label, action_pred)
     action_f1 = f1_score(action_label, action_pred,average='macro')
@@ -279,10 +278,19 @@ def classifer_metrics(action_logits, action_label,obj_logits, obj_label):
     obj_acc = accuracy_score(obj_label, obj_pred)
     obj_f1 = f1_score(obj_label, obj_pred,average='macro')
     
+    # joint accuracy
+    action_correct = (action_pred == action_label)
+    obj_correct = (obj_pred == obj_label)
+    both_correct = action_correct & obj_correct
+    
+    joint_accuracy = np.mean(both_correct)
+    
+    
     metrics = {'Action Accuracy': action_acc,
                'Action F1 score': action_f1,
                'Object Accuracy': obj_acc,
-               'Object F1 score': obj_f1}
+               'Object F1 score': obj_f1,
+               'Joint Accuracy': joint_accuracy}
     return metrics  
         
 def getModelSize(model):
